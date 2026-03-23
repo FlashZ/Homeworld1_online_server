@@ -6,3 +6,5 @@ won_server.db-wal
 won_server.db-shm
 keys/*.der
 !keys/kver.kp
+SERVER_CODE_WALKTHROUGH.md
+.env

@@ -36,34 +36,6 @@ flowchart LR
     auth --> crypto
 ```
 
-### Components
-
-```mermaid
-flowchart TB
-    subgraph runtime["Runtime Services"]
-        backend["JSON Backend<br/>won_server.py<br/>Port 9100"]
-        gateway["Binary Gateway<br/>titan_binary_gateway.py<br/>Port 15101"]
-        lobby["Routing / Lobby<br/>built into gateway<br/>Ports 15100-15120"]
-        probe["Firewall Probe<br/>built into gateway<br/>Port 2021"]
-        admin["Admin Dashboard<br/>built into gateway<br/>Port 8080"]
-    end
-
-    subgraph support["Support Modules and Tools"]
-        codecs["Titan Codecs<br/>titan_messages.py"]
-        crypto["Crypto Primitives<br/>won_crypto.py"]
-        keygen["Key Generator<br/>generate_keys.py"]
-        installer_tool["Client Installer<br/>installer/HWOnlineSetup.exe"]
-    end
-
-    gateway --> backend
-    gateway --> lobby
-    gateway --> probe
-    gateway --> admin
-    gateway --> codecs
-    gateway --> crypto
-    keygen --> gateway
-    installer_tool --> gateway
-```
 
 ## Features
 
@@ -88,9 +60,9 @@ flowchart TB
 
 ### Known gaps
 
-- **Credential validation**: The server issues a certificate to any connecting client without checking username or password.
+- **Credential validation**: The server issues a certificate to any connecting client without checking username or password. Since Homeworld is this old, I don't see the point in forcing User reg, will fix if this causes any issues.
 - **NAT/firewall detection**: The probe reply is implemented, but strict-NAT behavior still needs broader field testing on real networks.
-- **Reconnect-to-match**: Reconnect currently matches on the same player name and IP, so it still needs wider real-world validation.
+- **Reconnect-to-match**: Reconnect currently matches on the same player name and IP, so it still needs wider real-world validation in game.
 - **Game process model**: Routing rooms are managed in-gateway rather than spawning external `RoutingServHWGame` binaries.
 
 ---
@@ -103,7 +75,9 @@ Build the Windows installer once on a Windows machine:
 installer\build_installer.bat
 ```
 
-Then distribute `HWOnlineSetup.exe` to each player and run it as Administrator with the server host or IP:
+By default, the installer now targets `homeworld.kerrbell.dev` and offers a custom host/IP option in its server picker UI.
+
+You can still distribute `HWOnlineSetup.exe` to each player and run it as Administrator with an explicit server host or IP:
 
 ```powershell
 HWOnlineSetup.exe 192.168.x.x

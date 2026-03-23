@@ -8,7 +8,8 @@ using Microsoft.Win32;
 
 internal static class HWClientSetup
 {
-    private const string DefaultServerHost = "hw1.lanflat.net";
+    private const string DefaultServerHost = "homeworld.kerrbell.dev";
+    private const string CustomHostOptionLabel = "Custom host or IP";
     private const int DefaultGatewayPort = 15101;
     private const string DefaultDisplayCdKey = "NYX7-ZEC9-FYZ6-GUX8-4253";
     private const string DefaultPlainCdKey = "NYX7ZEC9FYZ6GUX84253";
@@ -338,38 +339,101 @@ internal static class HWClientSetup
     private static string PromptForServerHost(string defaultValue)
     {
         using (Form form = new Form())
-        using (Label label = new Label())
-        using (TextBox textBox = new TextBox())
+        using (Label presetLabel = new Label())
+        using (ComboBox presetCombo = new ComboBox())
+        using (Label customLabel = new Label())
+        using (TextBox customTextBox = new TextBox())
         using (Button okButton = new Button())
         using (Button cancelButton = new Button())
         {
+            string initialValue = string.IsNullOrWhiteSpace(defaultValue)
+                ? DefaultServerHost
+                : defaultValue.Trim();
+
             form.Text = "Homeworld Online Setup";
             form.FormBorderStyle = FormBorderStyle.FixedDialog;
             form.StartPosition = FormStartPosition.CenterScreen;
-            form.ClientSize = new Size(420, 120);
+            form.ClientSize = new Size(420, 170);
             form.MinimizeBox = false;
             form.MaximizeBox = false;
             form.AcceptButton = okButton;
             form.CancelButton = cancelButton;
 
-            label.AutoSize = true;
-            label.Location = new Point(12, 15);
-            label.Text = "Directory/Patch server host:";
+            presetLabel.AutoSize = true;
+            presetLabel.Location = new Point(12, 15);
+            presetLabel.Text = "Server preset:";
 
-            textBox.Location = new Point(15, 40);
-            textBox.Size = new Size(390, 23);
-            textBox.Text = defaultValue;
+            presetCombo.DropDownStyle = ComboBoxStyle.DropDownList;
+            presetCombo.Location = new Point(15, 40);
+            presetCombo.Size = new Size(390, 23);
+            presetCombo.Items.Add(DefaultServerHost);
+            presetCombo.Items.Add(CustomHostOptionLabel);
+
+            customLabel.AutoSize = true;
+            customLabel.Location = new Point(12, 75);
+            customLabel.Text = "Custom host or IP:";
+
+            customTextBox.Location = new Point(15, 100);
+            customTextBox.Size = new Size(390, 23);
 
             okButton.Text = "OK";
-            okButton.Location = new Point(249, 80);
-            okButton.DialogResult = DialogResult.OK;
+            okButton.Location = new Point(249, 135);
 
             cancelButton.Text = "Cancel";
-            cancelButton.Location = new Point(330, 80);
+            cancelButton.Location = new Point(330, 135);
             cancelButton.DialogResult = DialogResult.Cancel;
 
-            form.Controls.Add(label);
-            form.Controls.Add(textBox);
+            EventHandler syncSelection = delegate
+            {
+                bool useCustom = string.Equals(
+                    presetCombo.SelectedItem as string,
+                    CustomHostOptionLabel,
+                    StringComparison.OrdinalIgnoreCase);
+                customTextBox.Enabled = useCustom;
+                customLabel.Enabled = useCustom;
+            };
+
+            if (string.Equals(initialValue, DefaultServerHost, StringComparison.OrdinalIgnoreCase))
+            {
+                presetCombo.SelectedIndex = 0;
+                customTextBox.Text = string.Empty;
+            }
+            else
+            {
+                presetCombo.SelectedIndex = 1;
+                customTextBox.Text = initialValue;
+            }
+            syncSelection(null, EventArgs.Empty);
+
+            presetCombo.SelectedIndexChanged += syncSelection;
+
+            okButton.Click += delegate
+            {
+                bool useCustom = string.Equals(
+                    presetCombo.SelectedItem as string,
+                    CustomHostOptionLabel,
+                    StringComparison.OrdinalIgnoreCase);
+                if (useCustom && string.IsNullOrWhiteSpace(customTextBox.Text))
+                {
+                    MessageBox.Show(
+                        form,
+                        "Enter a custom host or IP, or switch back to the default server.",
+                        "Homeworld Online Setup",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                    customTextBox.Focus();
+                    form.DialogResult = DialogResult.None;
+                    return;
+                }
+
+                form.DialogResult = DialogResult.OK;
+                form.Close();
+            };
+
+            form.Controls.Add(presetLabel);
+            form.Controls.Add(presetCombo);
+            form.Controls.Add(customLabel);
+            form.Controls.Add(customTextBox);
             form.Controls.Add(okButton);
             form.Controls.Add(cancelButton);
 
@@ -378,7 +442,15 @@ internal static class HWClientSetup
             {
                 throw new OperationCanceledException();
             }
-            return textBox.Text.Trim();
+
+            string selectedValue = presetCombo.SelectedItem as string;
+            if (string.Equals(selectedValue, CustomHostOptionLabel, StringComparison.OrdinalIgnoreCase))
+            {
+                return customTextBox.Text.Trim();
+            }
+            return string.IsNullOrWhiteSpace(selectedValue)
+                ? DefaultServerHost
+                : selectedValue.Trim();
         }
     }
 
