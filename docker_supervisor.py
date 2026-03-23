@@ -58,6 +58,8 @@ def main() -> int:
         os.environ["ADMIN_HOST"],
         "--admin-port",
         os.environ["ADMIN_PORT"],
+        "--db-path",
+        db_path,
         "--keys-dir",
         keys_dir,
         "--log",
