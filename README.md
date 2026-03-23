@@ -1,76 +1,142 @@
 # WON OSS Server (Homeworld-oriented)
 
-Open-source replacement for the Sierra WON (World Opponent Network) backend services, targeting Homeworld 1 multiplayer. Implements the real WON/Titan wire protocol — including Auth1 key exchange, NR-MD5 signatures, and ElGamal encryption — so the original Homeworld 1 client can connect without executable patching.
+Open-source replacement for the Sierra WON (World Opponent Network) backend services, targeting Homeworld 1 multiplayer. It implements the real WON/Titan wire protocol, including Auth1 key exchange, NR-MD5 signatures, and ElGamal encryption, so the original Homeworld 1 client can connect without executable patching.
 
 ## Architecture
 
-```
-┌──────────────┐  Titan binary  ┌───────────────────────────┐     ┌────────────────┐
-│  Homeworld   │───────────────▶│      Binary Gateway        │────▶│  JSON Backend   │
-│   Client     │◀───────────────│   (titan_binary_gateway.py)│◀────│  (won_server.py)│
-│              │  :15101 auth   │                            │     │                │
-│              │  :15100 lobby  │  ┌─────────────────────┐  │     │  SQLite WAL    │
-└──────────────┘                │  │   GatewayEventBus   │  │     │  persistence   │
-                                │  │  (in-process pub/sub)│  │     └────────────────┘
-                                │  └─────────────────────┘  │
-                                │                            │
-                                │  Titan framing / codecs:   │
-                                │  ┌─────────────────────┐  │
-                                │  │   titan_messages.py  │  │
-                                │  │   won_crypto.py      │  │
-                                │  └─────────────────────┘  │
-                                └───────────────────────────┘
+```mermaid
+flowchart LR
+    client["Homeworld 1 Client"]
+    installer["Windows Installer<br/>HWOnlineSetup.exe"]
+
+    subgraph gateway["Binary Gateway<br/>titan_binary_gateway.py"]
+        auth["Auth1 + Directory<br/>15101"]
+        routing["Native Routing / Lobby<br/>15100-15120"]
+        firewall["Firewall Probe<br/>2021"]
+        dashboard["Admin Dashboard<br/>8080"]
+        bus["GatewayEventBus"]
+        codecs["titan_messages.py"]
+        crypto["won_crypto.py"]
+    end
+
+    backend["JSON Backend<br/>won_server.py<br/>9100"]
+    db[("SQLite WAL")]
+
+    installer --> client
+    client -->|"Titan binary protocol"| auth
+    client -->|"Routing and game traffic"| routing
+    client -->|"NAT probe"| firewall
+    auth -->|"JSON RPC"| backend
+    routing -->|"JSON RPC"| backend
+    auth --> bus
+    routing --> bus
+    dashboard --> bus
+    backend --> db
+    auth --> codecs
+    auth --> crypto
 ```
 
 ### Components
 
-| Component | File | Port (default) | Purpose |
-|---|---|---|---|
-| JSON Backend | `won_server.py` | 9100 | Core state: auth, lobbies, matchmaking, routing, events, persistence |
-| Binary Gateway | `titan_binary_gateway.py` | 15101 | Titan-native protocol: Auth1 handshake, DirGet, Auth1Peer, Factory, native routing |
-| Routing/Lobby | (built into gateway) | 15100-15120 | Native Homeworld chat rooms and game routing |
-| Firewall Probe | (built into gateway) | 2021 | Accepts connections for NAT detection |
-| Admin Dashboard | (built into gateway) | 8080 | Live web dashboard showing rooms, players, logs, DB snapshot |
-| Titan Codecs | `titan_messages.py` | — | Titan-like message encode/decode (auth, dir, route, chat, data objects) |
-| Crypto Primitives | `won_crypto.py` | — | NR-MD5, ElGamal, Auth1 key blocks, certificates, TMessage framing |
-| Key Generator | `generate_keys.py` | — | One-time DSA key pair generation; produces `kver.kp` for game directory |
-| Client Installer | `installer/HWOnlineSetup.exe` | — | Standalone Windows installer (no Python needed) |
+```mermaid
+flowchart TB
+    subgraph runtime["Runtime Services"]
+        backend["JSON Backend<br/>won_server.py<br/>Port 9100"]
+        gateway["Binary Gateway<br/>titan_binary_gateway.py<br/>Port 15101"]
+        lobby["Routing / Lobby<br/>built into gateway<br/>Ports 15100-15120"]
+        probe["Firewall Probe<br/>built into gateway<br/>Port 2021"]
+        admin["Admin Dashboard<br/>built into gateway<br/>Port 8080"]
+    end
+
+    subgraph support["Support Modules and Tools"]
+        codecs["Titan Codecs<br/>titan_messages.py"]
+        crypto["Crypto Primitives<br/>won_crypto.py"]
+        keygen["Key Generator<br/>generate_keys.py"]
+        installer_tool["Client Installer<br/>installer/HWOnlineSetup.exe"]
+    end
+
+    gateway --> backend
+    gateway --> lobby
+    gateway --> probe
+    gateway --> admin
+    gateway --> codecs
+    gateway --> crypto
+    keygen --> gateway
+    installer_tool --> gateway
+```
 
 ## Features
 
 ### Implemented
 
-- **Real Auth1 crypto** (`won_crypto.py`): NR-MD5 signatures (WON "BogusSign/BogusVerify"), ElGamal public-key encryption (WON wire format), DER key encoding, Auth1PublicKeyBlock and Auth1Certificate builders — all confirmed byte-for-byte against WON open-source (`wonapi/WONCrypt/ElGamal.cpp`)
-- **Auth1 handshake** (port 15101): Full 4-message HW handshake — GetPubKeys → GetPubKeysReply → LoginRequestHW → ChallengeHW → ConfirmHW → LoginReply with signed certificate. Keys loaded from `keys/` at startup.
-- **Auth1Peer sessions**: Encrypted persistent sessions for directory queries and factory requests, using the same ElGamal + Blowfish key exchange
-- **Directory service**: `DirGet` SmallMessage protocol; returns AuthServer, TitanRoutingServer, TitanFactoryServer entries with addresses and `ValidVersions` data objects
-- **Native Homeworld routing** (port 15100-15120): Full MiniRouting protocol — RegisterClient, GetClientList, SendChat, SendData, SendDataBroadcast, SubscribeDataObject, Create/Replace/Delete/Renew DataObject, KeepAlive, DisconnectClient. Supports multiple concurrent rooms via dynamic port allocation.
-- **Silencer routing server** (port 15100): Legacy Homeworld lobby/conflict protocol — INIT, NEW_CONFLICT, CONFLICTQUERY, CHATMESSAGE, ABORT_CONFLICT, USER_TERMINATION
-- **Factory service**: Allocates routing server ports for chat and game rooms on demand
-- **Firewall probe** (port 2021): Accepts and closes connections used for NAT detection
-- **Admin dashboard** (port 8080): Live web UI showing rooms, connected players, chat feed, routing data objects, IP metrics, gateway logs, and a read-only snapshot of `won_server.db`
-- **Backend state**: Auth, lobbies, matchmaking, routing, game-launch lifecycle via JSON backend (`won_server.py`)
-- **Push-based event delivery**: `GatewayEventBus` pushes chat, join, and game-launch events over persistent TCP
-- **Persistence**: SQLite WAL — users, lobbies, sessions survive restarts
-- **Docker deployment**: Single-container setup with `docker-compose.yml`, automatic data seeding on first start
-- **Windows client installer**: Standalone `.exe` (no Python needed) that auto-detects the game, installs CD key, `kver.kp`, and `NetTweak.script`
+- **Real Auth1 crypto** (`won_crypto.py`): NR-MD5 signatures, ElGamal public-key encryption, DER key encoding, Auth1PublicKeyBlock builders, and Auth1Certificate builders confirmed against WON open-source behavior.
+- **Auth1 handshake** (port `15101`): Full 4-message Homeworld login flow with signed certificates loaded from `keys/`.
+- **Auth1Peer sessions**: Encrypted persistent sessions for directory queries and factory requests.
+- **Directory service**: `DirGet` SmallMessage support returning AuthServer, TitanRoutingServer, TitanFactoryServer, and `ValidVersions` data objects.
+- **Native Homeworld routing** (ports `15100-15120`): `RegisterClient`, `GetClientList`, `SendChat`, `SendData`, `SendDataBroadcast`, `SubscribeDataObject`, `Create/Replace/Delete/RenewDataObject`, `KeepAlive`, and `DisconnectClient`.
+- **Silencer routing server** (port `15100`): Legacy Homeworld lobby/conflict protocol support for `INIT`, `NEW_CONFLICT`, `CONFLICTQUERY`, `CHATMESSAGE`, `ABORT_CONFLICT`, and `USER_TERMINATION`.
+- **Factory service**: Allocates routing server ports for chat rooms and game rooms on demand.
+- **Reconnect-to-match support**: Short reconnect grace window for abrupt disconnects so a returning player can reclaim the same routing slot.
+- **Firewall probe** (port `2021`): Returns a 16-byte probe stub used for NAT/firewall detection.
+- **Server keepalive and session cleanup**: Routing keepalives and peer session expiry run in the gateway background maintenance loop.
+- **Admin dashboard** (port `8080`): Live web UI showing rooms, connected players, chat feed, routing data objects, IP metrics, gateway logs, and a read-only snapshot of `won_server.db`.
+- **Backend state**: Auth, lobbies, matchmaking, routing, and game-launch lifecycle via the JSON backend (`won_server.py`).
+- **Push-based event delivery**: `GatewayEventBus` pushes chat, join, and game-launch events over persistent TCP.
+- **Persistence**: SQLite WAL; users, lobbies, and sessions survive restarts.
+- **Docker deployment**: Single-container setup that starts both processes and seeds persistent data on first launch.
+- **Windows client installer**: Standalone `.exe` that auto-detects the game, installs a valid CD key, writes `NetTweak.script`, and installs `kver.kp`.
 
 ### Known gaps
 
-- **Credential validation**: Server issues a certificate to any connecting client without checking username/password (fine for public play — the goal is to let people play)
-- **NAT/firewall detection**: The gateway now returns a 16-byte probe stub, but strict-NAT behaviour still needs broader field testing on real networks
-- **Reconnect-to-match**: Routing now keeps a short reconnect grace window, but it currently matches by the same player name and IP and still needs wider real-world validation
-- **Game process model**: Routing rooms are managed in-gateway rather than spawning external `RoutingServHWGame` binaries; this works but means game rooms share the gateway process
+- **Credential validation**: The server issues a certificate to any connecting client without checking username or password.
+- **NAT/firewall detection**: The probe reply is implemented, but strict-NAT behavior still needs broader field testing on real networks.
+- **Reconnect-to-match**: Reconnect currently matches on the same player name and IP, so it still needs wider real-world validation.
+- **Game process model**: Routing rooms are managed in-gateway rather than spawning external `RoutingServHWGame` binaries.
 
 ---
 
-## Quick start
+## Client install
 
-Run each command in a **separate terminal** from the repo root.
+Build the Windows installer once on a Windows machine:
 
-### 0. Generate keys for a new trust domain (optional)
+```powershell
+installer\build_installer.bat
+```
 
-If you are creating an independent fork instead of using the bundled key set, generate a fresh verifier/auth pair first:
+Then distribute `HWOnlineSetup.exe` to each player and run it as Administrator with the server host or IP:
+
+```powershell
+HWOnlineSetup.exe 192.168.x.x
+```
+
+If you have DNS set up, you can pass a hostname instead:
+
+```powershell
+HWOnlineSetup.exe hw1.example.com
+```
+
+The installer:
+
+- auto-detects the Homeworld install directory (registry plus common paths)
+- installs a valid WON Homeworld CD key in the registry
+- writes `NetTweak.script` so `hosts` file edits are not needed
+- installs `kver.kp` into the game folder
+
+No Python is required on client machines. Players just run the installer and then launch Homeworld normally.
+
+## Server install
+
+### Python deployment
+
+Run each command in a separate terminal from the repo root.
+
+Install the Python dependencies first:
+
+```powershell
+python -m pip install -r requirements-server.txt
+```
+
+If you want a fresh trust domain instead of the bundled key set, generate keys once before first start:
 
 ```powershell
 python generate_keys.py `
@@ -85,9 +151,7 @@ This writes:
 - `authserver_private.der`
 - `kver.kp`
 
-If you are using the existing bundled trust domain, skip this step.
-
-### 1. Start the JSON backend (terminal 1)
+If you are using the bundled trust domain, skip that step and start the backend:
 
 ```powershell
 python won_server.py `
@@ -95,9 +159,7 @@ python won_server.py `
   --db-path won_server.db
 ```
 
-The backend persists all state to `won_server.db`. Delete the file to start fresh.
-
-### 2. Start the binary gateway (terminal 2)
+Then start the binary gateway:
 
 ```powershell
 python titan_binary_gateway.py `
@@ -110,38 +172,61 @@ python titan_binary_gateway.py `
   --log-level INFO
 ```
 
-Replace `192.168.x.x` with your LAN IP (or public VPS IP). Homeworld connects to **port 15101** for Auth1 and directory queries, and to **port 15100+** for routing/lobby.
+Set `--public-host` to the address your clients will use to reach the server. Homeworld connects to port `15101` for Auth1 and directory queries, and to ports `15100+` for routing and lobby traffic.
 
-Open [http://127.0.0.1:8080/](http://127.0.0.1:8080/) on the host machine to view the admin dashboard.
+When running locally, open [http://127.0.0.1:8080/](http://127.0.0.1:8080/) on the host machine to view the admin dashboard.
 
-### 3. Bootstrap clients (Windows installer)
+Ports to expose:
 
-Build the installer once on a Windows machine:
+- `15101/tcp` for Titan gateway and Auth1
+- `15100-15120/tcp` for routing, chat, and game rooms
+- `2021/tcp` for the firewall probe
 
-```powershell
-installer\build_installer.bat
-```
+### Docker deployment
 
-Then distribute `HWOnlineSetup.exe` to each player and run it as Administrator:
+Install Docker Engine and the Docker Compose plugin, then work from the repo root. On Windows, Docker Desktop is the simplest option.
 
-```powershell
-HWOnlineSetup.exe 192.168.x.x
-```
-
-The installer:
-
-- auto-detects the Homeworld install directory (registry + common paths), prompts if not found
-- installs a valid WON Homeworld CD key in the registry
-- writes `NetTweak.script` so `hosts`-file edits are not needed
-- installs `kver.kp` into the game folder
-
-No Python required on client machines. Players just double-click the exe, then launch Homeworld normally.
-
-You can also pass a hostname if you have DNS set up:
+Copy `.env.example` to `.env`:
 
 ```powershell
-HWOnlineSetup.exe hw1.example.com
+Copy-Item .env.example .env
 ```
+
+Or on bash:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` and set `PUBLIC_HOST` to the address your clients will use.
+
+If you are reusing an existing network, place your current key files in `data/keys/` before first start so clients continue trusting the server. If you already have a database you want to keep, place it at `data/won_server.db` before first start.
+
+Start the container:
+
+```bash
+docker compose up -d --build
+```
+
+Watch the logs:
+
+```bash
+docker compose logs -f
+```
+
+Stop the stack:
+
+```bash
+docker compose down
+```
+
+Docker notes:
+
+- The container runs both `won_server.py` and `titan_binary_gateway.py`.
+- Persistent data is stored under `./data`.
+- On first start, the container copies the bundled `won_server.db` and `keys/*` into `./data` only when those files do not already exist.
+- The main ports to expose are `15101/tcp`, `15100-15120/tcp`, and `2021/tcp`.
+- The admin dashboard is bound to `127.0.0.1:8080` on the Docker host.
 
 ---
 
@@ -188,206 +273,46 @@ If the installer is not rebuilt, the fork operator must at least distribute thei
 
 ### First-start checklist for an independent fork
 
-1. Replace `keys/` with the fork's own matching verifier/auth files.
-2. Use a fresh hostname, public IP, and database.
+1. Replace `keys/` with the fork's own matching verifier and auth files.
+2. Use a fresh hostname or IP and a fresh database.
 3. If using Docker, place the fork's key files in `./data/keys/` before the first `docker compose up`.
 4. Rebuild the Windows installer so it embeds the fork's host and `kver.kp`.
 5. Distribute that rebuilt installer, or manually distribute the matching `kver.kp` and `NetTweak.script`.
 
 ---
 
-## Lean server install
+## Auth1 protocol details
 
-If you want a smaller VPS/runtime copy, you do not need to ship the whole development folder.
+The Auth1 handshake uses a 4-message exchange over a single TCP connection on port `15101`.
 
-### Minimum files for a plain Python server
+### Handshake flow
+
+```mermaid
+sequenceDiagram
+    participant C as Homeworld Client
+    participant S as Gateway 15101
+
+    C->>S: Auth1GetPubKeys
+    S-->>C: Auth1GetPubKeysReply
+    C->>S: Auth1LoginRequestHW
+    S-->>C: Auth1LoginChallengeHW
+    C->>S: Auth1LoginConfirmHW
+    S-->>C: Auth1LoginReply + Auth1Certificate
+    Note over C,S: Connection closes, then the client connects to routing on 15100+
+```
+
+### Key block and certificate
+
+- **Auth1PublicKeyBlock** contains the auth server public key (`p`, `q`, `g`, `y`), signed with the verifier private key. The game verifies this against `kver.kp`.
+- **Auth1Certificate** contains an ephemeral user session public key, signed with the auth server private key. It is issued on successful login and carried by the client to authenticate to routing servers.
+
+### TMessage wire format
 
 ```text
-won_oss_server/
-  __init__.py
-  won_server.py
-  titan_binary_gateway.py
-  titan_messages.py
-  won_crypto.py
-  requirements-server.txt
-  keys/
-    verifier_private.der
-    authserver_private.der
-```
-
-### Minimum files for Docker deployment
-
-```text
-won_oss_server/
-  __init__.py
-  won_server.py
-  titan_binary_gateway.py
-  titan_messages.py
-  won_crypto.py
-  requirements-server.txt
-  Dockerfile
-  docker-entrypoint.sh
-  docker_supervisor.py
-  docker-compose.yml
-  .env             # create from .env.example
-  keys/
-    verifier_private.der
-    authserver_private.der
-```
-
-### Safe to remove from a server-only copy
-
-- `installer/` — only needed if distributing the Windows client installer from the VPS
-- `generate_keys.py` — only needed if your keypair is not yet generated
-- `SERVER_CODE_WALKTHROUGH.md`
-- `README.md`
-- `__pycache__/`
-- `.gitignore`
-- `.dockerignore` — if you are not using Docker
-- `.env.example` — after you have created your real `.env`
-
-### Key files actually required at runtime
-
-For the current server runtime, only these private keys are required:
-
-- `keys/verifier_private.der`
-- `keys/authserver_private.der`
-
-Useful but not strictly required on the server at runtime:
-
-- `keys/verifier_public.der`
-- `keys/authserver_public.der`
-- `keys/kver.kp`
-
-Keep `kver.kp` backed up somewhere safe even if you remove it from the VPS copy. Clients and the Windows installer still need it, and it must match the server's active keypair.
-
----
-
-## Docker deployment
-
-### What it does
-
-- Builds one image containing `won_server.py` and `titan_binary_gateway.py`
-- Starts both processes inside one container
-- Persists the SQLite database and key material under `./data`
-- Seeds `./data/won_server.db` and `./data/keys/` from the bundled repo copy on first start only
-
-Your existing clients will keep working as long as the container is seeded with the same keys they already trust.
-
-### Files
-
-- `Dockerfile`
-- `docker-entrypoint.sh`
-- `docker-compose.yml`
-- `.env.example`
-
-### First-time VPS setup
-
-From inside the `won_oss_server` directory on the VPS:
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and set:
-
-```text
-PUBLIC_HOST=207.211.142.136
-```
-
-Use the server's public IPv4 here. Keep using the same verifier/auth key set your clients already have.
-
-### Build and start
-
-```bash
-docker compose up -d --build
-```
-
-### View logs
-
-```bash
-docker compose logs -f
-```
-
-### Stop
-
-```bash
-docker compose down
-```
-
-### Ports to open
-
-- `15101/tcp` — Titan gateway + Auth1
-- `15100-15120/tcp` — routing/chat/game rooms
-- `2021/tcp` — firewall probe
-
-The compose file also binds the admin dashboard to `127.0.0.1:8080` on the VPS host only.
-
-### Data persistence
-
-The compose file mounts:
-
-```text
-./data:/data
-```
-
-Important notes:
-
-- On first start, the container copies `won_server.db` and `keys/*` into `/data` only if those files do not already exist.
-- After that, the container keeps using the persisted `/data` copy.
-- If you are migrating an existing live server, make sure `./data/keys/` contains your current `authserver_private.der`, `verifier_private.der`, and `kver.kp` before letting clients connect.
-
-This is the recommended VPS deployment path because it avoids the "gateway is up but backend on 9100 died with the shell" failure mode.
-
----
-
-## Auth1 Protocol Details
-
-The Auth1 handshake uses a 4-message exchange over a single TCP connection on port 15101.
-
-### Handshake Flow
-
-```
-Client                                          Server (port 15101)
-  │                                                │
-  │── Auth1GetPubKeys (TMessage svc=201, msg=1) ──▶│
-  │◀── Auth1GetPubKeysReply (msg=2) ───────────────│  [status=0][keyBlockLen][Auth1PublicKeyBlock]
-  │                                                │
-  │── Auth1LoginRequestHW (msg=30) ───────────────▶│  [blockId][EG(session_key)][BF(login_data)]
-  │◀── Auth1LoginChallengeHW (msg=32) ─────────────│  [raw_len][16 random bytes]
-  │                                                │
-  │── Auth1LoginConfirmHW (msg=33) ───────────────▶│  [raw_len][confirm_bytes]
-  │◀── Auth1LoginReply (msg=4) ────────────────────│  [status=0][0][1][1][certLen][Auth1Certificate]
-  │                                                │
-  │  (connection closes)                           │
-  │                                                │
-  │── connects to port 15100 (routing/lobby) ─────▶│
-```
-
-### Key Block and Certificate
-
-- **Auth1PublicKeyBlock**: contains the auth server's public key (p, q, g, y), signed with the verifier private key. The game verifies this against `kver.kp`.
-- **Auth1Certificate**: contains an ephemeral user session public key, signed with the auth server private key. Issued on successful login; carried by the client to authenticate to routing servers.
-
-### TMessage Wire Format
-
-```
-[u32 LE total_size]      ← includes these 4 bytes
-[u32 LE service_type]    ← 201 (Auth1Login)
+[u32 LE total_size]      <- includes these 4 bytes
+[u32 LE service_type]    <- 201 (Auth1Login)
 [u32 LE msg_type]
 [body...]
 ```
 
-Detection: `body[0] == 0xC9` (low byte of service_type 201 in LE).
-
----
-
-## Roadmap
-
-1. ✅ **Reverse-engineer Auth1 wire format** — Confirmed from WON open-source.
-2. ✅ **Implement crypto primitives** — `won_crypto.py`: NR-MD5, ElGamal, key blocks, certificates.
-3. ✅ **Wire up Auth1 in gateway** — Keys loaded at startup, full handshake working end-to-end.
-4. ✅ **End-to-end client test** — Game reaches lobby screen, chat works, rooms visible.
-5. ✅ **Internet multiplayer** — Two clients tested over the public internet: lobby, chat, game hosting, joining, and full gameplay confirmed working.
-6. ✅ **Firewall probe response** — Gateway now sends a 16-byte probe response instead of only accepting and closing.
-7. ✅ **Server keepalive** — Gateway now sends periodic routing keepalives and reaps stale peer sessions.
+Detection: `body[0] == 0xC9` (the low byte of service type 201 in little-endian form).
