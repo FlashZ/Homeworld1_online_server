@@ -1,0 +1,80 @@
+name: HWOnlineInstaller Release
+
+on:
+  release:
+    types:
+      - published
+      - edited
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-upload-installer:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve installer version
+        id: version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          $version = if ($env:RELEASE_TAG) { $env:RELEASE_TAG } elseif ($env:GITHUB_REF -like 'refs/tags/*') { $env:GITHUB_REF_NAME } else { "manual-$env:GITHUB_RUN_NUMBER-$($env:GITHUB_SHA.Substring(0, 7))" }
+          $version = $version.Trim()
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            $version = "manual-$env:GITHUB_RUN_NUMBER"
+          }
+
+          $semverSource = $version -replace '^[vV]', ''
+          $match = [regex]::Match($semverSource, '^(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)(?:\.(?<build>\d+))?(?:[-+].*)?$')
+
+          if ($match.Success) {
+            $build = if ($match.Groups['build'].Success) { [int]$match.Groups['build'].Value } else { 0 }
+            $numericVersion = "{0}.{1}.{2}.{3}" -f $match.Groups['major'].Value, $match.Groups['minor'].Value, $match.Groups['patch'].Value, $build
+          } else {
+            $fallbackBuild = [Math]::Min([int]$env:GITHUB_RUN_NUMBER, 65534)
+            $numericVersion = "0.0.0.$fallbackBuild"
+          }
+
+          $safeVersion = ($version -replace '[<>:"/\\|?*]', '-').Trim('. ')
+          if ([string]::IsNullOrWhiteSpace($safeVersion)) {
+            $safeVersion = "build-$env:GITHUB_RUN_NUMBER"
+          }
+
+          $outputName = "HWOnlineSetup-$safeVersion.exe"
+
+          "informational_version=$version" >> $env:GITHUB_OUTPUT
+          "file_version=$numericVersion" >> $env:GITHUB_OUTPUT
+          "assembly_version=$numericVersion" >> $env:GITHUB_OUTPUT
+          "output_name=$outputName" >> $env:GITHUB_OUTPUT
+
+      - name: Build HWOnline installer
+        env:
+          INSTALLER_VERSION: ${{ steps.version.outputs.informational_version }}
+          INSTALLER_FILE_VERSION: ${{ steps.version.outputs.file_version }}
+          INSTALLER_ASSEMBLY_VERSION: ${{ steps.version.outputs.assembly_version }}
+          INSTALLER_OUTPUT_NAME: ${{ steps.version.outputs.output_name }}
+        shell: cmd
+        run: installer\build_installer.bat
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.output_name }}
+          path: installer/${{ steps.version.outputs.output_name }}
+          if-no-files-found: error
+
+      - name: Upload release asset
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INSTALLER_OUTPUT_NAME: ${{ steps.version.outputs.output_name }}
+        shell: pwsh
+        run: gh release upload "$env:RELEASE_TAG" "installer/$env:INSTALLER_OUTPUT_NAME#$env:INSTALLER_OUTPUT_NAME" --clobber
