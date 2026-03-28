@@ -3974,11 +3974,15 @@ class AdminDashboardServer:
     }
     function bindDbTabs(){content.querySelectorAll("[data-db-table]").forEach(btn=>{btn.addEventListener("click",()=>{activeDbTable=btn.dataset.dbTable;content.innerHTML=renderDatabase(lastSnapshot);bindDbTabs();});});}
 
-    function tokenQuery(){return adminToken?`?token=${encodeURIComponent(adminToken)}`:"";}
+    function withToken(path){
+      if(!adminToken)return path;
+      const sep=path.includes("?")?"&":"?";
+      return `${path}${sep}token=${encodeURIComponent(adminToken)}`;
+    }
 
     async function adminAction(endpoint,payload){
       try{
-        const res=await fetch(`/api/admin/${endpoint}${tokenQuery()}`,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+        const res=await fetch(withToken(`/api/admin/${endpoint}`),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
         const data=await res.json();
         if(data.ok){showToast("Action succeeded","success");}else{showToast(data.error||"Action failed","error");}
         await refresh();
@@ -4050,7 +4054,7 @@ class AdminDashboardServer:
     });
 
     async function refresh(){
-      const res=await fetch(`/api/snapshot?rows=50&logs=300&activity=200${tokenQuery()}`,{cache:"no-store"});
+      const res=await fetch(withToken(`/api/snapshot?rows=50&logs=300&activity=200`),{cache:"no-store"});
       if(!res.ok)throw new Error("HTTP "+res.status);
       renderAll(await res.json());
     }
