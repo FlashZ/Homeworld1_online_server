@@ -161,6 +161,8 @@ The shared `./data` bind mount now holds product-scoped state such as:
 - `data/cataclysm/won_server.db`
 - `data/cataclysm/keys/`
 
+In shared-edge mode, the first startup will reuse the existing Homeworld key set for `data/cataclysm/keys/` if Cataclysm does not have its own copy yet. That keeps both products on the same network identity by default.
+
 There is no custom Docker entrypoint or sidecar supervisor in this setup. Compose launches the Python commands directly, and the only bootstrap logic left is a small first-run seed step in the backend service command so `./data` starts with the bundled database and keys.
 
 Useful environment knobs:

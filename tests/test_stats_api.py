@@ -522,6 +522,32 @@ def test_shared_gateway_tracks_product_from_user_and_peer_session_identity() -> 
     assert shared._runtime_for_peer_session(40000) is cat
 
 
+def test_shared_gateway_dir_request_prefers_exact_valid_versions_service() -> None:
+    home = titan_binary_gateway.BinaryGatewayServer(
+        "127.0.0.1",
+        9100,
+        product_profile=HOMEWORLD_PRODUCT_PROFILE,
+    )
+    cat = titan_binary_gateway.BinaryGatewayServer(
+        "127.0.0.1",
+        9101,
+        product_profile=CATACLYSM_PRODUCT_PROFILE,
+    )
+    shared = titan_binary_gateway.SharedBinaryGatewayServer(
+        {
+            "homeworld": home,
+            "cataclysm": cat,
+        }
+    )
+
+    assert shared._runtime_for_dir_request(
+        {"path": "/TitanServers", "service_name": "HomeworldValidVersions"}
+    ) is home
+    assert shared._runtime_for_dir_request(
+        {"path": "/TitanServers", "service_name": "CataclysmValidVersions"}
+    ) is cat
+
+
 def test_stats_token_is_scoped_to_stats_endpoint() -> None:
     dashboard = titan_binary_gateway.AdminDashboardServer(
         gateway=object(),

@@ -1831,6 +1831,11 @@ class SharedBinaryGatewayServer:
     ) -> BinaryGatewayServer:
         path = str(req.get("path") or "")
         service_name = str(req.get("service_name") or "")
+        if service_name:
+            for runtime in self.runtimes.values():
+                profile = runtime.product_profile
+                if service_name == profile.valid_versions_service:
+                    return runtime
         for runtime in self.runtimes.values():
             profile = runtime.product_profile
             if path == profile.directory_root or path.startswith(profile.directory_root + "/"):
