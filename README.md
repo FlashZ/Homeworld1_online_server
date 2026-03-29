@@ -1,23 +1,29 @@
-# Homeworld 1 - WON OSS Server
+# Retail WON OSS Server
 
 [![Tests](https://github.com/FlashZ/won_oss_server/actions/workflows/tests.yml/badge.svg)](https://github.com/FlashZ/won_oss_server/actions/workflows/tests.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/downloads/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![Homeworld 1.05](https://img.shields.io/badge/Homeworld-1.05-orange)](https://en.wikipedia.org/wiki/Homeworld)
+[![Cataclysm 1.0.0.1](https://img.shields.io/badge/Cataclysm-1.0.0.1-teal)](https://en.wikipedia.org/wiki/Homeworld:_Cataclysm)
 
-Open-source replacement for the Sierra WON (World Opponent Network) backend services, targeting **Homeworld 1 multiplayer**. It implements the real WON/Titan wire protocol - Auth1 key exchange, NR-MD5 signatures, and ElGamal encryption - so the original unpatched Homeworld 1 client can connect directly.
+Open-source replacement for the Sierra WON (World Opponent Network) backend services for the original retail Homeworld family. The repo now carries shared product profiles for **Homeworld 1** and **Homeworld: Cataclysm**, plus a unified Windows installer that can bootstrap either game.
 
-Tested against Homeworld 1.05. Homeworld Remastered Classic is not supported (its multiplayer was removed and it does not behave like the original retail client).
+The repo now supports:
+
+- **single-product stacks** via `--product homeworld|cataclysm`
+- an **experimental shared-edge mode** in `titan_binary_gateway.py --shared-edge` that can front both Homeworld and Cataclysm at once while keeping separate internal backends and routing ranges
+
+The shared-edge path is intended for active testing and validation, not a “retail-perfect” claim yet. Cataclysm-specific bootstrap notes live in [docs/cataclysm-bootstrap-notes.md](docs/cataclysm-bootstrap-notes.md), and the architecture plan is tracked in [docs/unified-edge-two-backend-architecture.md](docs/unified-edge-two-backend-architecture.md). Homeworld Remastered Classic is not supported.
 
 ## Quick start (Docker)
 
 ```bash
-cp .env.example .env        # then edit PUBLIC_HOST, BACKEND_SHARED_SECRET, and ADMIN_TOKEN
+cp .env.example .env        # then edit PRODUCT, PORT_BIND_IP, PUBLIC_HOST, BACKEND_SHARED_SECRET, and ADMIN_TOKEN
 docker compose up -d --build
 ```
 
-This builds one Docker image, then runs two containers from it: `backend` and `gateway`. On first launch the backend seeds default keys/database into `./data`, and both containers reuse that persistent state on later restarts.
+This builds one Docker image, then runs two containers from it: `backend` and `gateway`. Set `PRODUCT=homeworld` or `PRODUCT=cataclysm` in `.env` to choose the active retail profile for that stack. Compose now keeps each product in its own data root under `./data/<product>/`.
 
 Ports to expose:
 
@@ -43,9 +49,9 @@ GitHub Actions runs the same suite on every push and pull request across Python 
 
 ## Client setup
 
-Distribute `HWOnlineSetup.exe` to players. Run as Administrator
+Distribute `RetailWONSetup.exe` to players. Run as Administrator.
 
-The installer auto-detects the Homeworld install directory, optionally writes a randomized bundled CD key to the registry, updates `NetTweak.script` to point at your server, and installs the `kver.kp` verifier key. No Python required on client machines.
+The installer now auto-detects retail Homeworld and Cataclysm installs, prompts for the game when both are present, optionally writes a matching randomized retail CD key to the registry for the selected game, updates `NetTweak.script` to point at your server, and installs the shared `kver.kp` verifier key. No Python is required on client machines.
 
 The bundled installer pool is still static at runtime, but you can now regenerate a much larger pool from the real retail algorithm with `generate_cdkeys.py` instead of hand-curating captured keys.
 
@@ -55,11 +61,13 @@ To rebuild the installer from source:
 installer\build_installer.bat
 ```
 
+The default output artifact is `installer\RetailWONSetup.exe`. You can still override the filename with `INSTALLER_OUTPUT_NAME=...` when needed.
+
 ### How client bootstrap works
 
 Two files control which server the game contacts:
 
-- **`NetTweak.script`** - tells Homeworld which directory/patch server to connect to (`DIRSERVER_IPSTRINGS`, `DIRSERVER_PORTS`, `PATCHSERVER_IPSTRINGS`, `PATCHSERVER_PORTS`). The installer updates these values while preserving the rest of the retail script (LAN settings, port tuning).
+- **`NetTweak.script`** - tells the retail client which directory/patch server to connect to (`DIRSERVER_IPSTRINGS`, `DIRSERVER_PORTS`, `PATCHSERVER_IPSTRINGS`, `PATCHSERVER_PORTS`). The installer updates these values while preserving the rest of the retail script (LAN settings, port tuning).
 - **`kver.kp`** - the verifier public key the client uses to validate the server's Auth1 handshake.
 
 Both must match the server you are running. If the host points at one server but the verifier key belongs to another, the client will connect but Auth1 will fail.
@@ -91,10 +99,11 @@ Start the backend and gateway in separate terminals:
 
 ```powershell
 # Terminal 1 - backend
-python won_server.py --host 127.0.0.1 --port 9100 --db-path won_server.db
+python won_server.py --product homeworld --host 127.0.0.1 --port 9100 --db-path data/homeworld/won_server.db
 
 # Terminal 2 - gateway
 python titan_binary_gateway.py `
+  --product homeworld `
   --host 0.0.0.0 --port 15101 `
   --backend-host 127.0.0.1 --backend-port 9100 `
   --public-host 192.168.x.x `
@@ -103,7 +112,7 @@ python titan_binary_gateway.py `
   --keys-dir keys --log-level INFO
 ```
 
-Set `--public-host` to the address clients will use to reach the server.
+Set `--public-host` to the address clients will use to reach the server. Swap `homeworld` for `cataclysm` to run the Cataclysm profile instead.
 
 Security defaults:
 
@@ -112,7 +121,7 @@ Security defaults:
 
 ### Docker details
 
-Copy `.env.example` to `.env` and set at least `PUBLIC_HOST`, `BACKEND_SHARED_SECRET`, and `ADMIN_TOKEN`. To reuse existing data, place key files in `data/keys/` and/or the database at `data/won_server.db` before first start.
+Copy `.env.example` to `.env` and set at least `PRODUCT`, `PORT_BIND_IP`, `PUBLIC_HOST`, `BACKEND_SHARED_SECRET`, and `ADMIN_TOKEN`. The default compose layout now keeps each stack under `data/<product>/`, so Homeworld and Cataclysm no longer share one flat DB/keys path by accident.
 
 ```bash
 docker compose up -d --build   # start
@@ -123,24 +132,33 @@ docker compose down            # stop
 Compose now starts two services from the same image:
 
 - `backend` runs `won_server.py` on the internal Docker network only.
-- `gateway` runs `titan_binary_gateway.py` and publishes the Homeworld-facing ports plus a localhost-only admin dashboard.
+- `gateway` runs `titan_binary_gateway.py` and publishes the retail-facing ports plus a localhost-only admin dashboard.
 
-The shared `./data` bind mount holds the SQLite database and Auth1 key material for both containers.
+The shared `./data` bind mount now holds product-scoped state such as:
+
+- `data/homeworld/won_server.db`
+- `data/homeworld/keys/`
+- `data/cataclysm/won_server.db`
+- `data/cataclysm/keys/`
 
 There is no custom Docker entrypoint or sidecar supervisor in this setup. Compose launches the Python commands directly, and the only bootstrap logic left is a small first-run seed step in the backend service command so `./data` starts with the bundled database and keys.
 
 Useful environment knobs:
 
+- `PRODUCT` selects the active product profile for both the backend and gateway. Use `homeworld` or `cataclysm`.
+- `PORT_BIND_IP` controls which host IP Docker publishes the retail ports on. Leave it at `0.0.0.0` for one stack, or pin separate stacks to separate host IPs.
 - `BACKEND_SHARED_SECRET` is required in Docker because the gateway talks to the backend over the Compose bridge network instead of container-local loopback.
 - `ADMIN_TOKEN` is required in Docker because the gateway must bind the dashboard on `0.0.0.0` inside the container before Docker can publish it back to `127.0.0.1` on the host.
 - `BACKEND_PORT`, `GATEWAY_PORT`, `ROUTING_PORT`, `ROUTING_MAX_PORT`, `FIREWALL_PORT`, and `ADMIN_PORT` let you remap the container listeners if needed.
+
+If you want to run Homeworld and Cataclysm at the same time in Docker today, the default Compose file still assumes one product per stack. Use two Compose projects with different `.env` files, different `PRODUCT` values, and either different `PORT_BIND_IP` values or different port mappings, or run the experimental shared-edge mode manually from Python while keeping two separate backend processes behind it.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    client["Homeworld 1 Client"]
-    installer["Windows Installer<br/>HWOnlineSetup.exe"]
+    client["Retail Homeworld / Cataclysm Client"]
+    installer["Windows Installer<br/>RetailWONSetup.exe"]
 
     subgraph gateway["Binary Gateway<br/>titan_binary_gateway.py"]
         auth["Auth1 + Directory<br/>15101"]
@@ -171,8 +189,8 @@ flowchart LR
 
 The server has two processes:
 
-- **`won_server.py`** - JSON-RPC backend handling auth, lobbies, matchmaking, and game-launch lifecycle. Persists state to SQLite (WAL mode).
-- **`titan_binary_gateway.py`** - Binary protocol gateway that speaks the native Titan wire format. Handles Auth1 handshakes, directory queries, routing, the factory service, firewall probes, and the admin dashboard. Communicates with the backend over internal JSON-RPC.
+- **`won_server.py`** - product-aware JSON-RPC backend handling auth, lobbies, matchmaking, and game-launch lifecycle. Persists state to SQLite (WAL mode).
+- **`titan_binary_gateway.py`** - product-aware binary protocol gateway that speaks the native Titan wire format. Handles Auth1 handshakes, directory queries, routing, the factory service, firewall probes, and the admin dashboard. Communicates with the backend over internal JSON-RPC.
 
 Supporting modules:
 
@@ -183,17 +201,20 @@ Supporting modules:
 
 - Full Auth1 handshake with signed certificates
 - Encrypted Auth1Peer sessions for directory and factory requests
+- Product profiles for Homeworld and Cataclysm
 - Directory service returning auth, routing, factory, and version entries
-- Native Homeworld routing: client registration, chat, data relay, data objects, keepalives
+- Native routing: client registration, chat, data relay, data objects, keepalives
 - Legacy Silencer lobby/conflict protocol
 - Factory service for dynamic game room port allocation
 - Reconnect-to-match with a short grace window
 - Push-based event delivery via `GatewayEventBus`
 - Admin dashboard with live rooms, players, chat, logs, and database snapshot
+- Unified Windows installer with per-game auto-detect and registry handling
 - SQLite WAL persistence across restarts
 
 ### Known limitations
 
+- **Shared edge is still experimental** - `titan_binary_gateway.py --shared-edge` now supports one public Titan edge with separate Homeworld and Cataclysm backends/routing ranges, but it still needs broader live-match validation before it should be treated as invisible-to-players production behavior.
 - **Native auth is still lightweight** - Homeworld/Cataclysm Auth1 now decrypts the native login blob, requires explicit account creation on first use, rejects missing or invalid retail-format CD keys, and binds each username to its first successful CD key. The legacy JSON auth endpoint still auto-creates users and there is no global CD-key uniqueness enforcement yet.
 - **NAT detection** - the firewall probe reply is implemented but strict-NAT behavior needs broader field testing.
 - **Reconnect-to-match** - matches on player name and IP; needs wider real-world validation.
@@ -212,7 +233,7 @@ To run an independent network:
 
 1. Generate a fresh key set: `python generate_keys.py --keys-dir keys`
 2. Use a fresh hostname/IP and database.
-3. If using Docker, place your key files in `./data/keys/` before first `docker compose up`.
+3. If using Docker, place your key files in `./data/<product>/keys/` before first `docker compose up`.
 4. Rebuild the installer with your host and `kver.kp` embedded (update `installer/hwclient_setup.cs`, then run `build_installer.bat`).
 5. Distribute that installer to your players, or manually distribute `kver.kp` and a matching `NetTweak.script`.
 

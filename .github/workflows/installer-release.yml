@@ -1,4 +1,4 @@
-name: HWOnlineInstaller Release
+name: Installer Release
 
 on:
   push:
@@ -7,7 +7,7 @@ on:
     paths:
       - "installer/**"
       - "keys/kver.kp"
-      - ".github/workflows/hwonlineinstaller-release.yml"
+      - ".github/workflows/installer-release.yml"
       - ".github/scripts/**"
   workflow_dispatch:
 
@@ -59,7 +59,7 @@ jobs:
           $run = $env:GITHUB_RUN_NUMBER
           $tag = "installer-v$date.$run"
           $version = "$date.$run"
-          $outputName = "HWOnlineSetup-$tag.exe"
+          $outputName = "RetailWONSetup-$tag.exe"
 
           "tag=$tag"               >> $env:GITHUB_OUTPUT
           "informational_version=$tag+$sha" >> $env:GITHUB_OUTPUT
@@ -67,7 +67,7 @@ jobs:
           "assembly_version=$version" >> $env:GITHUB_OUTPUT
           "output_name=$outputName" >> $env:GITHUB_OUTPUT
 
-      - name: Build HWOnline installer
+      - name: Build installer
         env:
           INSTALLER_VERSION: ${{ steps.version.outputs.informational_version }}
           INSTALLER_FILE_VERSION: ${{ steps.version.outputs.file_version }}
@@ -232,7 +232,7 @@ jobs:
         shell: pwsh
         run: |
           @"
-          ## HWOnline installer release summary
+          ## Installer release summary
 
           ${{ steps.notes.outputs.security }}
           "@ >> $env:GITHUB_STEP_SUMMARY
@@ -241,7 +241,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          name: "HWOnlineSetup ${{ steps.version.outputs.tag }}"
+          name: "RetailWONSetup ${{ steps.version.outputs.tag }}"
           body: |
             ## Installer update
 

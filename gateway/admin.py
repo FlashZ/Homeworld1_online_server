@@ -408,6 +408,16 @@ class AdminDashboardServer:
       }
       return name||"Homeworld Chat";
     }
+    function productBadge(product){
+      const name=String(product||"").trim();
+      if(!name||name==="shared-edge")return "";
+      return `<span class="pill" style="margin-left:0;margin-right:6px;">${esc(name)}</span>`;
+    }
+    function productText(product){
+      const name=String(product||"").trim();
+      if(!name||name==="shared-edge")return "";
+      return `[${name}] `;
+    }
     function routingGameStats(snapshot){
       const rt=(snapshot.gateway||{}).routing_manager||{};
       const servers=rt.servers||[];
@@ -548,7 +558,7 @@ class AdminDashboardServer:
       const gw=snapshot.gateway||{};
       const repo=snapshot.repo||{};
       const extra=repo.local_version?`<br>${esc(repo.local_version)}${repo.update_available?' &middot; update available':''}`:"";
-      sidebarFooter.innerHTML=`<span class="status-dot ok"></span> Online ${age(up)}<br>${esc(gw.version_str||"")} &middot; ${esc(gw.public_host||"")}${extra}`;
+      sidebarFooter.innerHTML=`<span class="status-dot ok"></span> Online ${age(up)}<br>${esc(gw.product||"")} &middot; ${esc(gw.version_str||"")} &middot; ${esc(gw.public_host||"")}${extra}`;
     }
 
     function renderTopbar(snapshot){
@@ -578,6 +588,8 @@ class AdminDashboardServer:
           <div class="card">
             <h2>Server Info</h2>
             <div class="kv">
+              <div class="k">Product</div><div class="v">${esc(gw.product||"")}${gw.community_name?` <span class="muted">(${esc(gw.community_name)})</span>`:""}</div>
+              <div class="k">Directory Root</div><div class="v">${esc(gw.directory_root||"")}</div>
               <div class="k">Public Host</div><div class="v">${esc(gw.public_host)}</div>
               <div class="k">Gateway Port</div><div class="v">${esc(gw.public_port)}</div>
               <div class="k">Routing Port</div><div class="v">${esc(gw.routing_port)}</div>
@@ -587,6 +599,7 @@ class AdminDashboardServer:
               <div class="k">Peer Sessions</div><div class="v">${esc(gw.peer_session_count)}</div>
               <div class="k">Uptime</div><div class="v">${age(snapshot.uptime_seconds)}</div>
               <div class="k">Valid Versions</div><div class="v">${(gw.valid_versions||[]).map(v=>`<span class="pill" style="margin-left:0;margin-right:4px;">${esc(v)}</span>`).join("")}</div>
+              ${Object.keys(gw.products||{}).length?`<div class="k">Runtimes</div><div class="v">${Object.entries(gw.products||{}).map(([name,info])=>`<span class="pill" style="margin-left:0;margin-right:4px;">${esc(name)}:${esc(info.routing_port||0)}</span>`).join("")}</div>`:""}
             </div>
           </div>
           <div class="card">
@@ -648,7 +661,7 @@ class AdminDashboardServer:
         <div class="table-wrap"><table>
           <thead><tr><th>Player</th><th>State</th><th>IP</th><th>Room</th><th>Chat</th><th>Connected</th><th>Idle</th><th style="width:120px">Actions</th></tr></thead>
           <tbody>${players.map(p=>`<tr>
-            <td>${hwMarkup(p.client_name)}</td>
+            <td>${productBadge(p.product)}${hwMarkup(p.client_name)}</td>
             <td>${gameStats.gamePorts.has(Number(p.room_port||0))?'<span class="badge badge-join">game</span>':'<span class="badge badge-default">lobby</span>'}</td>
             <td class="mono">${esc(p.client_ip)}</td>
             <td>${esc(displayRoomName(snapshot,p.room_name,p.room_port,gameStats.gamePorts.has(Number(p.room_port||0))))} <span class="muted">:${esc(p.room_port)}</span></td>
@@ -658,8 +671,9 @@ class AdminDashboardServer:
             <td><button class="btn btn-danger btn-sm" data-action="kick" data-room-port="${esc(p.room_port)}" data-client-id="${esc(p.client_id)}">Kick</button> <button class="btn btn-danger btn-sm" data-action="ban-ip" data-ip="${esc(p.client_ip)}">Ban</button></td>
           </tr>`).join("")}</tbody>
         </table></div>
-        ${players.map(p=>`<details><summary>${hwMarkup(p.client_name)} <span class="muted">${esc(p.client_ip)} &middot; ${esc(displayRoomName(snapshot,p.room_name,p.room_port,gameStats.gamePorts.has(Number(p.room_port||0))))}:${esc(p.room_port)}</span></summary>
+        ${players.map(p=>`<details><summary>${productBadge(p.product)}${hwMarkup(p.client_name)} <span class="muted">${esc(p.client_ip)} &middot; ${esc(displayRoomName(snapshot,p.room_name,p.room_port,gameStats.gamePorts.has(Number(p.room_port||0))))}:${esc(p.room_port)}</span></summary>
           <div class="kv" style="padding:8px 0;">
+            <div class="k">Product</div><div class="v">${esc(p.product||"")}</div>
             <div class="k">Client ID</div><div class="v">${esc(p.client_id)}</div>
             <div class="k">Name</div><div class="v">${hwPlain(p.client_name)}</div>
             <div class="k">State</div><div class="v">${gameStats.gamePorts.has(Number(p.room_port||0))?"In Game":"Lobby"}</div>
@@ -682,8 +696,9 @@ class AdminDashboardServer:
         const gameBytes=(room.games||[]).reduce((sum,g)=>sum+Number(g.data_len||0),0);
         const activeGames=Number(room.active_game_count||0);
         return `<div class="card">
-        <h2>${esc(roomName)} <span class="muted" style="font-weight:400;font-size:12px;">:${esc(room.listen_port)}</span> <span class="pill">${esc(room.player_count)} players</span> <span class="pill">${esc(activeGames)} games</span></h2>
+        <h2>${productBadge(room.product)}${esc(roomName)} <span class="muted" style="font-weight:400;font-size:12px;">:${esc(room.listen_port)}</span> <span class="pill">${esc(room.player_count)} players</span> <span class="pill">${esc(activeGames)} games</span></h2>
         <div class="kv">
+          <div class="k">Product</div><div class="v">${esc(room.product||"")}</div>
           <div class="k">Description</div><div class="v">${esc(room.room_description)}</div>
           <div class="k">Path</div><div class="v">${esc(room.room_path)}</div>
           <div class="k">Room Type</div><div class="v">${isGameRoom?"Game Routing":"Lobby / Published"}</div>
@@ -708,7 +723,7 @@ class AdminDashboardServer:
 
     function renderActivity(snapshot){
       const gw=snapshot.gateway||{};const activity=gw.activity||[];const servers=(gw.routing_manager||{}).servers||[];
-      const roomOpts=servers.map(r=>`<option value="${esc(r.listen_port)}">${esc(displayRoomName(snapshot,r.room_name,r.listen_port,!!r.is_game_room||Number(r.active_game_count||0)>0))}:${esc(r.listen_port)}</option>`).join("");
+      const roomOpts=servers.map(r=>`<option value="${esc(r.listen_port)}">${esc(productText(r.product)+displayRoomName(snapshot,r.room_name,r.listen_port,!!r.is_game_room||Number(r.active_game_count||0)>0))}:${esc(r.listen_port)}</option>`).join("");
       return `<div class="card">
         <h2>Activity Feed <span class="pill">${activity.length}</span></h2>
         <div class="action-bar">

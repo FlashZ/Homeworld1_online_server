@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from product_profile import CATACLYSM_PRODUCT_PROFILE, HOMEWORLD_PRODUCT_PROFILE
 import won_server
 
 
@@ -62,6 +63,72 @@ def test_native_login_requires_explicit_account_creation_and_binds_cd_key(tmp_pa
                 "hunter2",
                 cd_key="PYL8-GUD4-BET3-MEX9-6624",
                 create_account=False,
+            )
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize(
+    ("profile", "expected_root", "expected_valid_versions"),
+    [
+        (
+            HOMEWORLD_PRODUCT_PROFILE,
+            "/Homeworld",
+            "HomeworldValidVersions",
+        ),
+        (
+            CATACLYSM_PRODUCT_PROFILE,
+            "/Cataclysm",
+            "CataclysmValidVersions",
+        ),
+    ],
+)
+def test_backend_bootstrap_uses_selected_product_profile(
+    tmp_path,
+    profile,
+    expected_root: str,
+    expected_valid_versions: str,
+) -> None:
+    db_path = tmp_path / ("won_backend_" + profile.key + ".db")
+    store = won_server.StateStore(str(db_path))
+    state = won_server.WONLikeState(store, product_profile=profile)
+
+    try:
+        assert expected_root in state.directory
+        assert profile.titan_servers_path in state.directory
+        assert expected_root in state.protected_paths
+        assert profile.titan_servers_path in state.protected_paths
+
+        titan = state.directory[profile.titan_servers_path]
+        assert expected_valid_versions in titan
+        assert titan[expected_valid_versions]["payload"]["versions"] == list(
+            profile.backend_valid_versions
+        )
+    finally:
+        store.close()
+
+
+def test_native_login_uses_product_specific_cd_key_validation(tmp_path) -> None:
+    db_path = tmp_path / "won_native_auth_cataclysm.db"
+    store = won_server.StateStore(str(db_path))
+    state = won_server.WONLikeState(store, product_profile=CATACLYSM_PRODUCT_PROFILE)
+
+    try:
+        created = state.login_native(
+            "Beast",
+            "hunter2",
+            cd_key="GAF6-CAB4-SEX5-ZYL6-2622",
+            create_account=True,
+        )
+        assert created["created"] is True
+        assert created["cd_key_bound"] is True
+
+        with pytest.raises(ValueError, match="invalid_cd_key"):
+            state.login_native(
+                "WrongGameKey",
+                "hunter2",
+                cd_key="NYX7-ZEC9-FYZ6-GUX8-4253",
+                create_account=True,
             )
     finally:
         store.close()
