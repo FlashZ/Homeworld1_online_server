@@ -16,6 +16,7 @@ from .product_profile import HOMEWORLD_PRODUCT_PROFILE, ProductProfile
 globals().update({name: getattr(_protocol, name) for name in dir(_protocol) if name.startswith('_')})
 LOGGER = logging.getLogger(__name__)
 
+@dataclass
 class NativeRouteSubscription:
     link_id: int
     data_type: bytes

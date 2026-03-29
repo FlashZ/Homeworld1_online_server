@@ -5,6 +5,20 @@ import asyncio
 import titan_binary_gateway
 
 
+def test_native_route_subscription_is_constructible() -> None:
+    subscription = titan_binary_gateway.NativeRouteSubscription(
+        link_id=7,
+        data_type=b"HW",
+        exact_or_recursive=True,
+        group_or_members=False,
+    )
+
+    assert subscription.link_id == 7
+    assert subscription.data_type == b"HW"
+    assert subscription.exact_or_recursive is True
+    assert subscription.group_or_members is False
+
+
 def test_parse_mini_routing_reconnect_client() -> None:
     clear = bytes(
         [
