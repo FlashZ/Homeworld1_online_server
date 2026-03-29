@@ -16,6 +16,8 @@ class _FakeRoutingManager:
                     "connected_seconds": 120,
                     "idle_seconds": 3,
                     "last_activity_kind": "chat",
+                    "peer_data_messages": 2,
+                    "peer_data_bytes": 54,
                 },
                 {
                     "client_id": 2,
@@ -25,6 +27,8 @@ class _FakeRoutingManager:
                     "connected_seconds": 240,
                     "idle_seconds": 9,
                     "last_activity_kind": "peer_data",
+                    "peer_data_messages": 7,
+                    "peer_data_bytes": 611,
                 },
             ],
             "servers": [
@@ -55,7 +59,10 @@ class _FakeRoutingManager:
                     "owner_name": "Bravo",
                     "room_name": "Fleet Battle",
                     "room_port": 15102,
+                    "link_id": 44,
+                    "lifespan": 90,
                     "data_len": 185,
+                    "data_preview_hex": "aabbccddeeff00112233",
                 }
             ],
             "rooms": [
@@ -63,6 +70,7 @@ class _FakeRoutingManager:
                     "listen_port": 15100,
                     "room_display_name": "Default",
                     "game_count": 0,
+                    "data_object_count": 0,
                     "pending_reconnects": [
                         {
                             "client_id": 9,
@@ -76,6 +84,7 @@ class _FakeRoutingManager:
                     "listen_port": 15102,
                     "room_display_name": "Fleet Battle",
                     "game_count": 1,
+                    "data_object_count": 1,
                     "pending_reconnects": [],
                 },
             ],
@@ -120,6 +129,8 @@ def test_gateway_stats_snapshot_returns_bot_safe_presence_summary() -> None:
             "connected_seconds": 120,
             "idle_seconds": 3,
             "last_activity_kind": "chat",
+            "peer_data_messages": 2,
+            "peer_data_bytes": 54,
         },
         {
             "name": "Bravo",
@@ -130,7 +141,59 @@ def test_gateway_stats_snapshot_returns_bot_safe_presence_summary() -> None:
             "connected_seconds": 240,
             "idle_seconds": 9,
             "last_activity_kind": "peer_data",
+            "peer_data_messages": 7,
+            "peer_data_bytes": 611,
         },
+    ]
+    assert snapshot["traffic"] == {
+        "peer_data_messages_total": 9,
+        "peer_data_bytes_total": 665,
+        "game_object_count": 1,
+        "game_object_bytes_total": 185,
+    }
+    assert snapshot["rooms"] == [
+        {
+            "name": "Default",
+            "port": 15100,
+            "description": "Lobby",
+            "path": "/Homeworld",
+            "published": True,
+            "password_protected": False,
+            "player_count": 1,
+            "game_count": 0,
+            "reconnecting_count": 1,
+            "peer_data_messages": 2,
+            "peer_data_bytes": 54,
+            "game_data_bytes": 0,
+            "data_object_count": 0,
+        },
+        {
+            "name": "Fleet Battle",
+            "port": 15102,
+            "description": "1v1",
+            "path": "/Homeworld",
+            "published": True,
+            "password_protected": True,
+            "player_count": 1,
+            "game_count": 1,
+            "reconnecting_count": 0,
+            "peer_data_messages": 7,
+            "peer_data_bytes": 611,
+            "game_data_bytes": 185,
+            "data_object_count": 1,
+        },
+    ]
+    assert snapshot["games"] == [
+        {
+            "name": "hw_game",
+            "owner_name": "Bravo",
+            "room_name": "Fleet Battle",
+            "room_port": 15102,
+            "link_id": 44,
+            "lifespan": 90,
+            "data_len": 185,
+            "data_preview_hex": "aabbccddeeff00112233",
+        }
     ]
     assert snapshot["reconnecting_players"] == [
         {

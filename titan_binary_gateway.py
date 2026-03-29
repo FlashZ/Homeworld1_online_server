@@ -17,11 +17,14 @@ import sys
 from pathlib import Path
 
 # Allow direct execution from either:
-# - the standalone repo layout: <root>/won_oss_server/*.py
-# - the older nested layout:    <root>/tools/won_oss_server/*.py
-_package_parent = Path(__file__).resolve().parent.parent
-if str(_package_parent) not in sys.path:
-    sys.path.insert(0, str(_package_parent))
+# - a flat checkout with modules at repo root
+# - a package checkout where the repo itself is named won_oss_server
+# - the older nested layout under tools/
+_module_dir = Path(__file__).resolve().parent
+_package_parent = _module_dir.parent
+for _candidate in (_module_dir, _package_parent):
+    if str(_candidate) not in sys.path:
+        sys.path.insert(0, str(_candidate))
 
 import argparse
 import asyncio
@@ -45,7 +48,10 @@ import hashlib
 import json
 import binascii
 
-from won_oss_server import won_crypto
+try:
+    from won_oss_server import won_crypto
+except ModuleNotFoundError:
+    import won_crypto
 
 LOGGER = logging.getLogger(__name__)
 
@@ -357,16 +363,28 @@ class GitRepoMonitor:
             "git": after,
         }
 
-from won_oss_server.titan_messages import (
-    STATUS_FAIL,
-    STATUS_OK,
-    AuthLoginReply,
-    DirGetReply,
-    RoutingChatEvent,
-    RoutingDataObjectReply,
-    RoutingStatusReply,
-    decode_request,
-)
+try:
+    from won_oss_server.titan_messages import (
+        STATUS_FAIL,
+        STATUS_OK,
+        AuthLoginReply,
+        DirGetReply,
+        RoutingChatEvent,
+        RoutingDataObjectReply,
+        RoutingStatusReply,
+        decode_request,
+    )
+except ModuleNotFoundError:
+    from titan_messages import (
+        STATUS_FAIL,
+        STATUS_OK,
+        AuthLoginReply,
+        DirGetReply,
+        RoutingChatEvent,
+        RoutingDataObjectReply,
+        RoutingStatusReply,
+        decode_request,
+    )
 
 OP_PING = 0x01
 OP_DIR_GET = 0x10
@@ -421,6 +439,7 @@ ROUTING_DELETE_DATA_OBJECT = 0x0B
 ROUTING_GET_CLIENT_LIST = 0x0F
 ROUTING_GET_CLIENT_LIST_REPLY = 0x10
 ROUTING_PEER_DATA = 0x1A
+ROUTING_RECONNECT_CLIENT = 0x1E
 ROUTING_DISCONNECT_CLIENT = 0x0D
 ROUTING_KEEP_ALIVE = 0x16
 ROUTING_READ_DATA_OBJECT_REPLY = 0x1D
@@ -1123,6 +1142,23 @@ def _build_mini_routing_peer_data(client_id: int, data: bytes) -> bytes:
         + struct.pack("<H", int(client_id))
         + bytes(data)
     )
+
+
+def _parse_mini_routing_reconnect_client(clear: bytes) -> Dict[str, object]:
+    """Parse MMsgRoutingReconnectClient."""
+    service_type, message_type, payload = _parse_mini_message(clear)
+    if service_type != MINI_ROUTING_SERVICE or message_type != ROUTING_RECONNECT_CLIENT:
+        raise ValueError(
+            f"routing_reconnect_client_unexpected:{service_type}:{message_type}"
+        )
+    if len(payload) < 2:
+        raise ValueError("routing_reconnect_client_too_short")
+    client_id, = struct.unpack("<H", payload[:2])
+    want_missed_messages = bool(payload[2]) if len(payload) >= 3 else False
+    return {
+        "client_id": int(client_id),
+        "want_missed_messages": want_missed_messages,
+    }
 
 
 def _parse_mini_routing_send_data(clear: bytes) -> Dict[str, object]:
@@ -2024,6 +2060,26 @@ class SilencerRoutingServer:
             )
             return reservation
         return None
+
+    async def _claim_pending_reconnect_by_id(
+        self,
+        client_id: int,
+        client_ip: str,
+    ) -> Optional[PendingNativeReconnect]:
+        await self._expire_pending_reconnects()
+        reservation = self._pending_reconnects.get(int(client_id))
+        if reservation is None:
+            return None
+        if reservation.client_ip != client_ip:
+            return None
+        self._pending_reconnects.pop(int(client_id), None)
+        LOGGER.info(
+            "Routing(native): ReconnectClaim id=%d name=%r ip=%s (client-id path)",
+            reservation.client_id,
+            reservation.client_name,
+            reservation.client_ip,
+        )
+        return reservation
 
     async def _finalize_client_departure(
         self,
@@ -3356,6 +3412,81 @@ class SilencerRoutingServer:
                         LOGGER.debug("Routing(native): KeepAlive from %s:%s", *peer)
                         continue
 
+                    if service_type == MINI_ROUTING_SERVICE and message_type == ROUTING_RECONNECT_CLIENT:
+                        req = _parse_mini_routing_reconnect_client(clear)
+                        reconnect = await self._claim_pending_reconnect_by_id(
+                            int(req["client_id"]),
+                            client_ip,
+                        )
+                        if reconnect is None:
+                            LOGGER.info(
+                                "Routing(native): ReconnectClient failed from %s:%s for client_id=%d",
+                                *peer,
+                                int(req["client_id"]),
+                            )
+                            out_seq = await self._send_native_route_reply(
+                                writer,
+                                _build_mini_routing_status_reply(-1),
+                                session_key,
+                                out_seq,
+                            )
+                            continue
+
+                        registered_client_id = reconnect.client_id
+                        self._native_clients[registered_client_id] = NativeRouteClientState(
+                            client_id=reconnect.client_id,
+                            client_name_raw=bytes(reconnect.client_name_raw),
+                            client_name=str(reconnect.client_name),
+                            client_ip=str(reconnect.client_ip),
+                            client_ip_u32=int(reconnect.client_ip_u32),
+                            writer=writer,
+                            session_key=session_key,
+                            out_seq=out_seq,
+                            connected_at=float(reconnect.connected_at),
+                            last_activity_at=float(reconnect.last_activity_at),
+                            last_activity_kind=str(reconnect.last_activity_kind),
+                            chat_count=int(reconnect.chat_count),
+                            peer_data_messages=int(reconnect.peer_data_messages),
+                            peer_data_bytes=int(reconnect.peer_data_bytes),
+                            subscriptions=[
+                                NativeRouteSubscription(
+                                    link_id=sub.link_id,
+                                    data_type=bytes(sub.data_type),
+                                    exact_or_recursive=bool(sub.exact_or_recursive),
+                                    group_or_members=bool(sub.group_or_members),
+                                )
+                                for sub in reconnect.subscriptions
+                            ],
+                        )
+                        self._touch_native_client(registered_client_id, "reconnect")
+                        LOGGER.info(
+                            "Routing(native): ReconnectClient success from %s:%s id=%d name=%r want_missed=%s",
+                            *peer,
+                            registered_client_id,
+                            reconnect.client_name,
+                            bool(req["want_missed_messages"]),
+                        )
+                        if self.gateway is not None:
+                            self.gateway.record_activity(
+                                "rejoin",
+                                room_port=self.listen_port,
+                                room_name=self._room_display_name,
+                                room_path=self._room_path,
+                                player_id=registered_client_id,
+                                player_name=reconnect.client_name,
+                                player_ip=client_ip,
+                                details={"mode": "routing_reconnect"},
+                            )
+                        out_seq = await self._send_native_route_reply(
+                            writer,
+                            _build_mini_routing_status_reply(0),
+                            session_key,
+                            out_seq,
+                        )
+                        if registered_client_id in self._native_clients:
+                            self._native_clients[registered_client_id].out_seq = out_seq
+                        continue
+
                     if service_type == MINI_ROUTING_SERVICE and message_type == ROUTING_DISCONNECT_CLIENT:
                         disconnect_reason = "voluntary_disconnect"
                         if registered_client_id and registered_client_id in self._native_clients:
@@ -4047,6 +4178,30 @@ class AdminDashboardServer:
     function hwMarkup(v){const s=String(v??"");let o="";for(let i=0;i<s.length;i++){if(s[i]==="&"&&i+1<s.length){i++;o+=`<strong class="hw-strong">${esc(s[i])}</strong>`;}else{o+=esc(s[i]);}}return o;}
     function nameList(vs){return(vs||[]).map(v=>hwMarkup(v)).join(", ");}
     function kindBadge(k){const m={join:"badge-join",leave:"badge-leave",chat:"badge-chat"};return `<span class="badge ${m[k]||"badge-default"}">${esc(k)}</span>`;}
+    function shortHex(hex,maxChars=24){const s=String(hex||"").trim();if(!s)return "";return s.length>maxChars?`${s.slice(0,maxChars)}...`:s;}
+    function displayRoomName(snapshot,roomName,roomPort,gameCount=0){
+      const gw=snapshot.gateway||{};
+      const basePort=Number(gw.routing_port||0);
+      const port=Number(roomPort||0);
+      const name=String(roomName||"").trim();
+      if((!name||name==="Homeworld Chat")&&port&&basePort&&port!==basePort){
+        return gameCount>0?"Game Room":"Side Room";
+      }
+      return name||"Homeworld Chat";
+    }
+    function activityDetail(snapshot,event){
+      const text=String(event.text||"").trim();
+      if(text)return text;
+      const details=event.details||{};
+      const port=Number(event.room_port||0);
+      const basePort=Number(((snapshot.gateway||{}).routing_port)||0);
+      if((event.kind==="join"||event.kind==="rejoin")&&port&&basePort&&port!==basePort){
+        return event.kind==="rejoin"?"rejoined game room":"entered game room";
+      }
+      if(details.reason)return String(details.reason).replace(/_/g," ");
+      if(details.description)return String(details.description);
+      return "";
+    }
     function pauseAutoRefresh(ms=6000){pauseRefreshUntil=Math.max(pauseRefreshUntil,Date.now()+ms);}
     function repoSummary(repo){
       if(!repo||!repo.available)return '<span class="muted">Git metadata unavailable.</span>';
@@ -4087,12 +4242,14 @@ class AdminDashboardServer:
     function renderOverview(snapshot){
       const gw=snapshot.gateway||{};const rt=gw.routing_manager||{};const am=gw.activity_metrics||{};const db=snapshot.db||{};const repo=snapshot.repo||{};
       const banned=gw.banned_ips||[];
+      const peerBytes=(rt.players||[]).reduce((sum,p)=>sum+Number(p.peer_data_bytes||0),0);
       return `
         <div class="stat-grid">
           <div class="stat-card"><div class="label">Players Online</div><div class="value accent">${esc(rt.current_player_count||0)}</div></div>
           <div class="stat-card"><div class="label">Active Rooms</div><div class="value">${esc(rt.room_count||0)}</div></div>
           <div class="stat-card"><div class="label">Live Games</div><div class="value success">${esc(rt.current_game_count||0)}</div></div>
           <div class="stat-card"><div class="label">Unique IPs</div><div class="value">${esc(rt.current_unique_ip_count||0)}</div></div>
+          <div class="stat-card"><div class="label">Peer Data</div><div class="value">${esc(peerBytes)}<span style="font-size:13px;color:var(--text-2);margin-left:6px;">bytes</span></div></div>
         </div>
         <div class="card-grid">
           <div class="card">
@@ -4166,14 +4323,14 @@ class AdminDashboardServer:
           <tbody>${players.map(p=>`<tr>
             <td>${hwMarkup(p.client_name)}</td>
             <td class="mono">${esc(p.client_ip)}</td>
-            <td>${esc(p.room_name)} <span class="muted">:${esc(p.room_port)}</span></td>
+            <td>${esc(displayRoomName(snapshot,p.room_name,p.room_port))} <span class="muted">:${esc(p.room_port)}</span></td>
             <td>${esc(p.chat_count)}</td>
             <td>${age(p.connected_seconds)}</td>
             <td>${age(p.idle_seconds)}</td>
             <td><button class="btn btn-danger btn-sm" data-action="kick" data-room-port="${esc(p.room_port)}" data-client-id="${esc(p.client_id)}">Kick</button> <button class="btn btn-danger btn-sm" data-action="ban-ip" data-ip="${esc(p.client_ip)}">Ban</button></td>
           </tr>`).join("")}</tbody>
         </table></div>
-        ${players.map(p=>`<details><summary>${hwMarkup(p.client_name)} <span class="muted">${esc(p.client_ip)} &middot; ${esc(p.room_name)}:${esc(p.room_port)}</span></summary>
+        ${players.map(p=>`<details><summary>${hwMarkup(p.client_name)} <span class="muted">${esc(p.client_ip)} &middot; ${esc(displayRoomName(snapshot,p.room_name,p.room_port))}:${esc(p.room_port)}</span></summary>
           <div class="kv" style="padding:8px 0;">
             <div class="k">Client ID</div><div class="v">${esc(p.client_id)}</div>
             <div class="k">Name</div><div class="v">${hwPlain(p.client_name)}</div>
@@ -4188,24 +4345,33 @@ class AdminDashboardServer:
     function renderRooms(snapshot){
       const rt=(snapshot.gateway||{}).routing_manager||{};const servers=rt.servers||[];
       if(!servers.length)return '<div class="card"><h2>Rooms</h2><p class="muted">No routing rooms yet.</p></div>';
-      return servers.map(room=>`<div class="card">
-        <h2>${esc(room.room_name||"(unnamed)")} <span class="muted" style="font-weight:400;font-size:12px;">:${esc(room.listen_port)}</span> <span class="pill">${esc(room.player_count)} players</span> <span class="pill">${esc(room.game_count)} games</span></h2>
+      return servers.map(room=>{
+        const roomName=displayRoomName(snapshot,room.room_name,room.listen_port,room.game_count);
+        const peerMsgs=(room.players||[]).reduce((sum,p)=>sum+Number(p.peer_data_messages||0),0);
+        const peerBytes=(room.players||[]).reduce((sum,p)=>sum+Number(p.peer_data_bytes||0),0);
+        const gameBytes=(room.games||[]).reduce((sum,g)=>sum+Number(g.data_len||0),0);
+        return `<div class="card">
+        <h2>${esc(roomName)} <span class="muted" style="font-weight:400;font-size:12px;">:${esc(room.listen_port)}</span> <span class="pill">${esc(room.player_count)} players</span> <span class="pill">${esc(room.game_count)} games</span></h2>
         <div class="kv">
           <div class="k">Description</div><div class="v">${esc(room.room_description)}</div>
           <div class="k">Path</div><div class="v">${esc(room.room_path)}</div>
           <div class="k">Published</div><div class="v">${esc(room.published)}</div>
           <div class="k">Password Set</div><div class="v">${esc(room.room_password_set)}</div>
           <div class="k">Flags</div><div class="v">0x${Number(room.room_flags||0).toString(16)}</div>
+          <div class="k">Peer Data Msgs</div><div class="v">${esc(peerMsgs)}</div>
+          <div class="k">Peer Data Bytes</div><div class="v">${esc(peerBytes)}</div>
+          <div class="k">Game/Object Bytes</div><div class="v">${esc(gameBytes)}</div>
         </div>
         ${(room.players||[]).length?`<h3>Players</h3><div class="table-wrap"><table>
           <thead><tr><th>Name</th><th>IP</th><th>Chat</th><th>Idle</th><th style="width:60px">Action</th></tr></thead>
           <tbody>${room.players.map(p=>`<tr><td>${hwMarkup(p.client_name)}</td><td class="mono">${esc(p.client_ip)}</td><td>${esc(p.chat_count)}</td><td>${age(p.idle_seconds)}</td><td><button class="btn btn-danger btn-sm" data-action="kick" data-room-port="${esc(room.listen_port)}" data-client-id="${esc(p.client_id)}">Kick</button></td></tr>`).join("")}</tbody>
         </table></div>`:'<p class="muted" style="margin-top:8px;">No players in this room.</p>'}
-        ${(room.games||[]).length?`<h3>Published Games</h3><div class="table-wrap"><table>
-          <thead><tr><th>Name</th><th>Owner</th><th>Link</th><th>Data</th></tr></thead>
-          <tbody>${room.games.map(g=>`<tr><td>${esc(g.name)}</td><td>${hwMarkup(g.owner_name||String(g.owner_id))}</td><td>${esc(g.link_id)}</td><td>${esc(g.data_len)} bytes</td></tr>`).join("")}</tbody>
+        ${(room.games||[]).length?`<h3>Live Game Objects</h3><div class="table-wrap"><table>
+          <thead><tr><th>Name</th><th>Owner</th><th>Link</th><th>Data</th><th>Life</th><th>Preview</th></tr></thead>
+          <tbody>${room.games.map(g=>`<tr><td>${esc(g.name)}</td><td>${hwMarkup(g.owner_name||String(g.owner_id))}</td><td>${esc(g.link_id)}</td><td>${esc(g.data_len)} bytes</td><td>${esc(g.lifespan)}</td><td class="mono">${esc(shortHex(g.data_preview_hex,32))}</td></tr>`).join("")}</tbody>
         </table></div>`:'<p class="muted" style="margin-top:8px;">No published games.</p>'}
-      </div>`).join("");
+      </div>`;
+      }).join("");
     }
 
     function renderActivity(snapshot){
@@ -4225,9 +4391,9 @@ class AdminDashboardServer:
             <td class="mono">${esc(stamp(e.ts))}</td>
             <td>${kindBadge(e.kind)}</td>
             <td>${hwMarkup(e.player_name||"")}</td>
-            <td>${esc(e.room_name||"")}${e.room_port?` <span class="muted">:${esc(e.room_port)}</span>`:""}</td>
+            <td>${esc(displayRoomName(snapshot,e.room_name,e.room_port))}${e.room_port?` <span class="muted">:${esc(e.room_port)}</span>`:""}</td>
             <td class="mono">${esc(e.player_ip||"")}</td>
-            <td>${hwMarkup(e.text||"")}</td>
+            <td>${hwMarkup(activityDetail(snapshot,e))}</td>
           </tr>`).join("")}</tbody>
         </table></div>`:'<p class="muted">No activity recorded yet.</p>'}
       </div>`;
@@ -5126,6 +5292,10 @@ class BinaryGatewayServer:
 
         room_has_games: Dict[int, bool] = {}
         room_reconnect_counts: Dict[int, int] = {}
+        room_data_object_counts: Dict[int, int] = {}
+        room_peer_data_messages: Dict[int, int] = {}
+        room_peer_data_bytes: Dict[int, int] = {}
+        room_game_data_bytes: Dict[int, int] = {}
         reconnecting_players: list[Dict[str, object]] = []
 
         for room in rooms_raw:
@@ -5133,6 +5303,10 @@ class BinaryGatewayServer:
                 continue
             port = int(room.get("listen_port") or 0)
             room_has_games[port] = bool(room.get("game_count", 0) or room.get("games"))
+            room_data_object_counts[port] = int(
+                room.get("data_object_count")
+                or len(room.get("data_objects", []) or [])
+            )
             pending_reconnects = room.get("pending_reconnects", []) or []
             room_reconnect_counts[port] = len(pending_reconnects)
             room_name = str(room.get("room_display_name") or room.get("room_name") or "")
@@ -5155,6 +5329,10 @@ class BinaryGatewayServer:
             if not isinstance(player, dict):
                 continue
             room_port = int(player.get("room_port") or 0)
+            peer_data_messages = int(player.get("peer_data_messages") or 0)
+            peer_data_bytes = int(player.get("peer_data_bytes") or 0)
+            room_peer_data_messages[room_port] = room_peer_data_messages.get(room_port, 0) + peer_data_messages
+            room_peer_data_bytes[room_port] = room_peer_data_bytes.get(room_port, 0) + peer_data_bytes
             players.append(
                 {
                     "name": str(player.get("client_name") or ""),
@@ -5167,6 +5345,8 @@ class BinaryGatewayServer:
                     "connected_seconds": int(player.get("connected_seconds") or 0),
                     "idle_seconds": int(player.get("idle_seconds") or 0),
                     "last_activity_kind": str(player.get("last_activity_kind") or ""),
+                    "peer_data_messages": peer_data_messages,
+                    "peer_data_bytes": peer_data_bytes,
                 }
             )
 
@@ -5186,6 +5366,10 @@ class BinaryGatewayServer:
                     "player_count": int(room.get("player_count") or 0),
                     "game_count": int(room.get("game_count") or 0),
                     "reconnecting_count": int(room_reconnect_counts.get(port, 0)),
+                    "peer_data_messages": int(room_peer_data_messages.get(port, 0)),
+                    "peer_data_bytes": int(room_peer_data_bytes.get(port, 0)),
+                    "game_data_bytes": int(room_game_data_bytes.get(port, 0)),
+                    "data_object_count": int(room_data_object_counts.get(port, 0)),
                 }
             )
 
@@ -5193,15 +5377,32 @@ class BinaryGatewayServer:
         for game in games_raw:
             if not isinstance(game, dict):
                 continue
+            room_port = int(game.get("room_port") or 0)
+            data_len = int(game.get("data_len") or 0)
+            room_game_data_bytes[room_port] = room_game_data_bytes.get(room_port, 0) + data_len
             games.append(
                 {
                     "name": str(game.get("name") or ""),
                     "owner_name": str(game.get("owner_name") or ""),
                     "room_name": str(game.get("room_name") or ""),
-                    "room_port": int(game.get("room_port") or 0),
-                    "data_len": int(game.get("data_len") or 0),
+                    "room_port": room_port,
+                    "link_id": int(game.get("link_id") or 0),
+                    "lifespan": int(game.get("lifespan") or 0),
+                    "data_len": data_len,
+                    "data_preview_hex": str(game.get("data_preview_hex") or ""),
                 }
             )
+
+        for room in rooms:
+            port = int(room["port"])
+            room["game_data_bytes"] = int(room_game_data_bytes.get(port, 0))
+
+        traffic = {
+            "peer_data_messages_total": sum(room_peer_data_messages.values()),
+            "peer_data_bytes_total": sum(room_peer_data_bytes.values()),
+            "game_object_count": len(games),
+            "game_object_bytes_total": sum(int(game["data_len"]) for game in games),
+        }
 
         return {
             "generated_at": time.time(),
@@ -5220,6 +5421,7 @@ class BinaryGatewayServer:
                 "unique_ips": int(routing_snapshot.get("current_unique_ip_count") or 0),
                 "players_reconnecting": len(reconnecting_players),
             },
+            "traffic": traffic,
             "players": players,
             "reconnecting_players": reconnecting_players,
             "rooms": rooms,
