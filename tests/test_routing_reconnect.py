@@ -95,3 +95,27 @@ def test_dashboard_snapshot_marks_unpublished_active_room_as_game_room() -> None
     assert snapshot["servers"][0]["active_game_count"] == 1
     assert snapshot["rooms"][0]["is_game_room"] is True
     assert snapshot["rooms"][0]["active_game_count"] == 1
+
+
+def test_reconnect_reservations_are_not_offered_for_published_lobbies() -> None:
+    lobby_server = titan_binary_gateway.SilencerRoutingServer(
+        listen_port=15100,
+        publish_in_directory=True,
+    )
+    game_server = titan_binary_gateway.SilencerRoutingServer(
+        listen_port=15110,
+        publish_in_directory=False,
+    )
+    client = titan_binary_gateway.NativeRouteClientState(
+        client_id=1,
+        client_name_raw=b"Alpha",
+        client_name="Alpha",
+        client_ip="1.2.3.4",
+        client_ip_u32=0,
+        writer=None,  # type: ignore[arg-type]
+        session_key=b"",
+        out_seq=None,
+    )
+
+    assert lobby_server._should_offer_reconnect(client, "eof") is False
+    assert game_server._should_offer_reconnect(client, "eof") is True

@@ -215,7 +215,12 @@ class SilencerRoutingServer:
     ) -> bool:
         if disconnect_reason not in {"transport_lost", "connection_reset", "eof"}:
             return False
-        return bool(self._native_clients or self._data_objects or self._published)
+        # Only keep reconnect reservations for active game-room style routes.
+        # Published lobby/chat rooms should broadcast the leave immediately so
+        # clients do not retain stale names during the grace window.
+        if self._publish_in_directory:
+            return False
+        return True
 
     def _park_disconnected_client(
         self,
