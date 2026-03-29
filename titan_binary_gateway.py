@@ -4199,6 +4199,43 @@ class AdminDashboardServer:
       }
       return name||"Homeworld Chat";
     }
+    function routingGameStats(snapshot){
+      const rt=(snapshot.gateway||{}).routing_manager||{};
+      const servers=rt.servers||[];
+      const roomSnapshots=rt.rooms||[];
+      const players=rt.players||[];
+      const gamePorts=new Set();
+      let gameRooms=0;
+      let liveGames=0;
+      let reconnecting=0;
+      let peerMsgs=0;
+      let peerBytes=0;
+      let gameObjectBytes=0;
+      for(const room of servers){
+        const port=Number(room.listen_port||0);
+        const games=Array.isArray(room.games)?room.games:[];
+        if(games.length){
+          gameRooms+=1;
+          if(port)gamePorts.add(port);
+        }
+        liveGames+=games.length;
+        for(const game of games){
+          gameObjectBytes+=Number(game.data_len||0);
+        }
+      }
+      for(const room of roomSnapshots){
+        reconnecting+=Number(room.pending_reconnect_count||0);
+      }
+      let inGamePlayers=0;
+      let lobbyPlayers=0;
+      for(const player of players){
+        peerMsgs+=Number(player.peer_data_messages||0);
+        peerBytes+=Number(player.peer_data_bytes||0);
+        if(gamePorts.has(Number(player.room_port||0)))inGamePlayers+=1;
+        else lobbyPlayers+=1;
+      }
+      return {gamePorts,inGamePlayers,lobbyPlayers,gameRooms,liveGames,reconnecting,peerMsgs,peerBytes,gameObjectBytes};
+    }
     function activityDetail(snapshot,event){
       const text=String(event.text||"").trim();
       if(text)return text;
@@ -4304,15 +4341,20 @@ class AdminDashboardServer:
 
     function renderOverview(snapshot){
       const gw=snapshot.gateway||{};const rt=gw.routing_manager||{};const am=gw.activity_metrics||{};const db=snapshot.db||{};const repo=snapshot.repo||{};
+      const gameStats=routingGameStats(snapshot);
       const banned=gw.banned_ips||[];
-      const peerBytes=(rt.players||[]).reduce((sum,p)=>sum+Number(p.peer_data_bytes||0),0);
       return `
         <div class="stat-grid">
           <div class="stat-card"><div class="label">Players Online</div><div class="value accent">${esc(rt.current_player_count||0)}</div></div>
+          <div class="stat-card"><div class="label">Players In Game</div><div class="value success">${esc(gameStats.inGamePlayers)}</div></div>
+          <div class="stat-card"><div class="label">Players In Lobby</div><div class="value">${esc(gameStats.lobbyPlayers)}</div></div>
+          <div class="stat-card"><div class="label">Reconnecting</div><div class="value warning">${esc(gameStats.reconnecting)}</div></div>
           <div class="stat-card"><div class="label">Active Rooms</div><div class="value">${esc(rt.room_count||0)}</div></div>
+          <div class="stat-card"><div class="label">Game Rooms</div><div class="value">${esc(gameStats.gameRooms)}</div></div>
           <div class="stat-card"><div class="label">Live Games</div><div class="value success">${esc(rt.current_game_count||0)}</div></div>
           <div class="stat-card"><div class="label">Unique IPs</div><div class="value">${esc(rt.current_unique_ip_count||0)}</div></div>
-          <div class="stat-card"><div class="label">Peer Data</div><div class="value">${esc(peerBytes)}<span style="font-size:13px;color:var(--text-2);margin-left:6px;">bytes</span></div></div>
+          <div class="stat-card"><div class="label">Peer Data</div><div class="value">${esc(gameStats.peerBytes)}<span style="font-size:13px;color:var(--text-2);margin-left:6px;">bytes</span></div></div>
+          <div class="stat-card"><div class="label">Game Obj Bytes</div><div class="value">${esc(gameStats.gameObjectBytes)}<span style="font-size:13px;color:var(--text-2);margin-left:6px;">bytes</span></div></div>
         </div>
         <div class="card-grid">
           <div class="card">
@@ -4335,7 +4377,11 @@ class AdminDashboardServer:
               <div class="k">Joins</div><div class="v">${esc(am.join_count||0)}</div>
               <div class="k">Leaves</div><div class="v">${esc(am.leave_count||0)}</div>
               <div class="k">Chat Messages</div><div class="v">${esc(am.chat_count||0)}</div>
+              <div class="k">Peer Data Msgs</div><div class="v">${esc(gameStats.peerMsgs)}</div>
               <div class="k">Rooms Opened</div><div class="v">${esc(am.room_open_count||0)}</div>
+              <div class="k">Active Game Rooms</div><div class="v">${esc(gameStats.gameRooms)}</div>
+              <div class="k">Live Game Objects</div><div class="v">${esc(gameStats.liveGames)}</div>
+              <div class="k">Reconnect Holds</div><div class="v">${esc(gameStats.reconnecting)}</div>
               <div class="k">IPs Seen (total)</div><div class="v">${esc(am.unique_ip_count||0)}</div>
             </div>
             <h3>Database</h3>
@@ -4378,13 +4424,14 @@ class AdminDashboardServer:
     }
 
     function renderPlayers(snapshot){
-      const rt=(snapshot.gateway||{}).routing_manager||{};const players=rt.players||[];
+      const rt=(snapshot.gateway||{}).routing_manager||{};const players=rt.players||[];const gameStats=routingGameStats(snapshot);
       if(!players.length)return '<div class="card"><h2>Players</h2><p class="muted">No live players connected.</p></div>';
       return `<div class="card"><h2>Players <span class="pill">${players.length}</span></h2>
         <div class="table-wrap"><table>
-          <thead><tr><th>Player</th><th>IP</th><th>Room</th><th>Chat</th><th>Connected</th><th>Idle</th><th style="width:120px">Actions</th></tr></thead>
+          <thead><tr><th>Player</th><th>State</th><th>IP</th><th>Room</th><th>Chat</th><th>Connected</th><th>Idle</th><th style="width:120px">Actions</th></tr></thead>
           <tbody>${players.map(p=>`<tr>
             <td>${hwMarkup(p.client_name)}</td>
+            <td>${gameStats.gamePorts.has(Number(p.room_port||0))?'<span class="badge badge-join">game</span>':'<span class="badge badge-default">lobby</span>'}</td>
             <td class="mono">${esc(p.client_ip)}</td>
             <td>${esc(displayRoomName(snapshot,p.room_name,p.room_port))} <span class="muted">:${esc(p.room_port)}</span></td>
             <td>${esc(p.chat_count)}</td>
@@ -4397,6 +4444,7 @@ class AdminDashboardServer:
           <div class="kv" style="padding:8px 0;">
             <div class="k">Client ID</div><div class="v">${esc(p.client_id)}</div>
             <div class="k">Name</div><div class="v">${hwPlain(p.client_name)}</div>
+            <div class="k">State</div><div class="v">${gameStats.gamePorts.has(Number(p.room_port||0))?"In Game":"Lobby"}</div>
             <div class="k">Subscriptions</div><div class="v">${esc(p.subscription_count)}</div>
             <div class="k">Peer Data Msgs</div><div class="v">${esc(p.peer_data_messages)}</div>
             <div class="k">Peer Data Bytes</div><div class="v">${esc(p.peer_data_bytes)}</div>
@@ -4439,7 +4487,7 @@ class AdminDashboardServer:
 
     function renderActivity(snapshot){
       const gw=snapshot.gateway||{};const activity=gw.activity||[];const servers=(gw.routing_manager||{}).servers||[];
-      const roomOpts=servers.map(r=>`<option value="${esc(r.listen_port)}">${esc(r.room_name)}:${esc(r.listen_port)}</option>`).join("");
+      const roomOpts=servers.map(r=>`<option value="${esc(r.listen_port)}">${esc(displayRoomName(snapshot,r.room_name,r.listen_port,r.game_count))}:${esc(r.listen_port)}</option>`).join("");
       return `<div class="card">
         <h2>Activity Feed <span class="pill">${activity.length}</span></h2>
         <div class="action-bar">
