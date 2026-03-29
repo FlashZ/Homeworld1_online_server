@@ -9,7 +9,7 @@ from pathlib import Path
 import secrets
 import sqlite3
 import time
-from typing import Any, Deque, Dict, Optional
+from typing import Any, Deque, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from .repo_monitor import GitRepoMonitor
@@ -398,13 +398,13 @@ class AdminDashboardServer:
     function nameList(vs){return(vs||[]).map(v=>hwMarkup(v)).join(", ");}
     function kindBadge(k){const m={join:"badge-join",rejoin:"badge-join",leave:"badge-leave",chat:"badge-chat",broadcast:"badge-chat"};return `<span class="badge ${m[k]||"badge-default"}">${esc(k)}</span>`;}
     function shortHex(hex,maxChars=24){const s=String(hex||"").trim();if(!s)return "";return s.length>maxChars?`${s.slice(0,maxChars)}...`:s;}
-    function displayRoomName(snapshot,roomName,roomPort,gameCount=0){
+    function displayRoomName(snapshot,roomName,roomPort,isGameRoom=false){
       const gw=snapshot.gateway||{};
       const basePort=Number(gw.routing_port||0);
       const port=Number(roomPort||0);
       const name=String(roomName||"").trim();
       if((!name||name==="Homeworld Chat")&&port&&basePort&&port!==basePort){
-        return gameCount>0?"Game Room":"Side Room";
+        return isGameRoom?"Game Room":"Side Room";
       }
       return name||"Homeworld Chat";
     }
@@ -414,36 +414,45 @@ class AdminDashboardServer:
       const roomSnapshots=rt.rooms||[];
       const players=rt.players||[];
       const gamePorts=new Set();
+      const roomStateByPort=new Map();
       let gameRooms=0;
       let liveGames=0;
+      let liveGameObjects=0;
       let reconnecting=0;
       let peerMsgs=0;
       let peerBytes=0;
       let gameObjectBytes=0;
       for(const room of servers){
         const port=Number(room.listen_port||0);
+        const isGameRoom=!!room.is_game_room||Number(room.active_game_count||0)>0;
         const games=Array.isArray(room.games)?room.games:[];
-        if(games.length){
+        roomStateByPort.set(port,isGameRoom);
+        if(isGameRoom){
           gameRooms+=1;
           if(port)gamePorts.add(port);
         }
-        liveGames+=games.length;
+        liveGameObjects+=games.length;
         for(const game of games){
           gameObjectBytes+=Number(game.data_len||0);
         }
       }
+      liveGames=Number(rt.current_game_room_count||gameRooms);
       for(const room of roomSnapshots){
         reconnecting+=Number(room.pending_reconnect_count||0);
+        const port=Number(room.listen_port||0);
+        if(!roomStateByPort.has(port)){
+          roomStateByPort.set(port,!!room.is_game_room||Number(room.active_game_count||0)>0);
+        }
       }
       let inGamePlayers=0;
       let lobbyPlayers=0;
       for(const player of players){
         peerMsgs+=Number(player.peer_data_messages||0);
         peerBytes+=Number(player.peer_data_bytes||0);
-        if(gamePorts.has(Number(player.room_port||0)))inGamePlayers+=1;
+        if(roomStateByPort.get(Number(player.room_port||0)))inGamePlayers+=1;
         else lobbyPlayers+=1;
       }
-      return {gamePorts,inGamePlayers,lobbyPlayers,gameRooms,liveGames,reconnecting,peerMsgs,peerBytes,gameObjectBytes};
+      return {gamePorts,inGamePlayers,lobbyPlayers,gameRooms,liveGames,liveGameObjects,reconnecting,peerMsgs,peerBytes,gameObjectBytes};
     }
     function activityDetail(snapshot,event){
       const text=String(event.text||"").trim();
@@ -560,7 +569,7 @@ class AdminDashboardServer:
           <div class="stat-card"><div class="label">Reconnecting</div><div class="value warning">${esc(gameStats.reconnecting)}</div></div>
           <div class="stat-card"><div class="label">Active Rooms</div><div class="value">${esc(rt.room_count||0)}</div></div>
           <div class="stat-card"><div class="label">Game Rooms</div><div class="value">${esc(gameStats.gameRooms)}</div></div>
-          <div class="stat-card"><div class="label">Live Games</div><div class="value success">${esc(rt.current_game_count||0)}</div></div>
+          <div class="stat-card"><div class="label">Live Games</div><div class="value success">${esc(gameStats.liveGames)}</div></div>
           <div class="stat-card"><div class="label">Unique IPs</div><div class="value">${esc(rt.current_unique_ip_count||0)}</div></div>
           <div class="stat-card"><div class="label">Peer Data</div><div class="value">${esc(gameStats.peerBytes)}<span style="font-size:13px;color:var(--text-2);margin-left:6px;">bytes</span></div></div>
           <div class="stat-card"><div class="label">Game Obj Bytes</div><div class="value">${esc(gameStats.gameObjectBytes)}<span style="font-size:13px;color:var(--text-2);margin-left:6px;">bytes</span></div></div>
@@ -589,7 +598,7 @@ class AdminDashboardServer:
               <div class="k">Peer Data Msgs</div><div class="v">${esc(gameStats.peerMsgs)}</div>
               <div class="k">Rooms Opened</div><div class="v">${esc(am.room_open_count||0)}</div>
               <div class="k">Active Game Rooms</div><div class="v">${esc(gameStats.gameRooms)}</div>
-              <div class="k">Live Game Objects</div><div class="v">${esc(gameStats.liveGames)}</div>
+              <div class="k">Live Game Objects</div><div class="v">${esc(gameStats.liveGameObjects)}</div>
               <div class="k">Reconnect Holds</div><div class="v">${esc(gameStats.reconnecting)}</div>
               <div class="k">IPs Seen (total)</div><div class="v">${esc(am.unique_ip_count||0)}</div>
             </div>
@@ -642,14 +651,14 @@ class AdminDashboardServer:
             <td>${hwMarkup(p.client_name)}</td>
             <td>${gameStats.gamePorts.has(Number(p.room_port||0))?'<span class="badge badge-join">game</span>':'<span class="badge badge-default">lobby</span>'}</td>
             <td class="mono">${esc(p.client_ip)}</td>
-            <td>${esc(displayRoomName(snapshot,p.room_name,p.room_port))} <span class="muted">:${esc(p.room_port)}</span></td>
+            <td>${esc(displayRoomName(snapshot,p.room_name,p.room_port,gameStats.gamePorts.has(Number(p.room_port||0))))} <span class="muted">:${esc(p.room_port)}</span></td>
             <td>${esc(p.chat_count)}</td>
             <td>${age(p.connected_seconds)}</td>
             <td>${age(p.idle_seconds)}</td>
             <td><button class="btn btn-danger btn-sm" data-action="kick" data-room-port="${esc(p.room_port)}" data-client-id="${esc(p.client_id)}">Kick</button> <button class="btn btn-danger btn-sm" data-action="ban-ip" data-ip="${esc(p.client_ip)}">Ban</button></td>
           </tr>`).join("")}</tbody>
         </table></div>
-        ${players.map(p=>`<details><summary>${hwMarkup(p.client_name)} <span class="muted">${esc(p.client_ip)} &middot; ${esc(displayRoomName(snapshot,p.room_name,p.room_port))}:${esc(p.room_port)}</span></summary>
+        ${players.map(p=>`<details><summary>${hwMarkup(p.client_name)} <span class="muted">${esc(p.client_ip)} &middot; ${esc(displayRoomName(snapshot,p.room_name,p.room_port,gameStats.gamePorts.has(Number(p.room_port||0))))}:${esc(p.room_port)}</span></summary>
           <div class="kv" style="padding:8px 0;">
             <div class="k">Client ID</div><div class="v">${esc(p.client_id)}</div>
             <div class="k">Name</div><div class="v">${hwPlain(p.client_name)}</div>
@@ -666,15 +675,18 @@ class AdminDashboardServer:
       const rt=(snapshot.gateway||{}).routing_manager||{};const servers=rt.servers||[];
       if(!servers.length)return '<div class="card"><h2>Rooms</h2><p class="muted">No routing rooms yet.</p></div>';
       return servers.map(room=>{
-        const roomName=displayRoomName(snapshot,room.room_name,room.listen_port,room.game_count);
-        const peerMsgs=(room.players||[]).reduce((sum,p)=>sum+Number(p.peer_data_messages||0),0);
-        const peerBytes=(room.players||[]).reduce((sum,p)=>sum+Number(p.peer_data_bytes||0),0);
+        const isGameRoom=!!room.is_game_room||Number(room.active_game_count||0)>0;
+        const roomName=displayRoomName(snapshot,room.room_name,room.listen_port,isGameRoom);
+        const peerMsgs=Number(room.peer_data_messages||0);
+        const peerBytes=Number(room.peer_data_bytes||0);
         const gameBytes=(room.games||[]).reduce((sum,g)=>sum+Number(g.data_len||0),0);
+        const activeGames=Number(room.active_game_count||0);
         return `<div class="card">
-        <h2>${esc(roomName)} <span class="muted" style="font-weight:400;font-size:12px;">:${esc(room.listen_port)}</span> <span class="pill">${esc(room.player_count)} players</span> <span class="pill">${esc(room.game_count)} games</span></h2>
+        <h2>${esc(roomName)} <span class="muted" style="font-weight:400;font-size:12px;">:${esc(room.listen_port)}</span> <span class="pill">${esc(room.player_count)} players</span> <span class="pill">${esc(activeGames)} games</span></h2>
         <div class="kv">
           <div class="k">Description</div><div class="v">${esc(room.room_description)}</div>
           <div class="k">Path</div><div class="v">${esc(room.room_path)}</div>
+          <div class="k">Room Type</div><div class="v">${isGameRoom?"Game Routing":"Lobby / Published"}</div>
           <div class="k">Published</div><div class="v">${esc(room.published)}</div>
           <div class="k">Password Set</div><div class="v">${esc(room.room_password_set)}</div>
           <div class="k">Flags</div><div class="v">0x${Number(room.room_flags||0).toString(16)}</div>
@@ -689,14 +701,14 @@ class AdminDashboardServer:
         ${(room.games||[]).length?`<h3>Live Game Objects</h3><div class="table-wrap"><table>
           <thead><tr><th>Name</th><th>Owner</th><th>Link</th><th>Data</th><th>Life</th><th>Preview</th></tr></thead>
           <tbody>${room.games.map(g=>`<tr><td>${esc(g.name)}</td><td>${hwMarkup(g.owner_name||String(g.owner_id))}</td><td>${esc(g.link_id)}</td><td>${esc(g.data_len)} bytes</td><td>${esc(g.lifespan)}</td><td class="mono">${esc(shortHex(g.data_preview_hex,32))}</td></tr>`).join("")}</tbody>
-        </table></div>`:'<p class="muted" style="margin-top:8px;">No published games.</p>'}
+        </table></div>`:`<p class="muted" style="margin-top:8px;">${isGameRoom?"No live game objects.":"No published games."}</p>`}
       </div>`;
       }).join("");
     }
 
     function renderActivity(snapshot){
       const gw=snapshot.gateway||{};const activity=gw.activity||[];const servers=(gw.routing_manager||{}).servers||[];
-      const roomOpts=servers.map(r=>`<option value="${esc(r.listen_port)}">${esc(displayRoomName(snapshot,r.room_name,r.listen_port,r.game_count))}:${esc(r.listen_port)}</option>`).join("");
+      const roomOpts=servers.map(r=>`<option value="${esc(r.listen_port)}">${esc(displayRoomName(snapshot,r.room_name,r.listen_port,!!r.is_game_room||Number(r.active_game_count||0)>0))}:${esc(r.listen_port)}</option>`).join("");
       return `<div class="card">
         <h2>Activity Feed <span class="pill">${activity.length}</span></h2>
         <div class="action-bar">
@@ -711,7 +723,7 @@ class AdminDashboardServer:
             <td class="mono">${esc(stamp(e.ts))}</td>
             <td>${kindBadge(e.kind)}</td>
             <td>${hwMarkup(e.player_name||"")}</td>
-            <td>${esc(displayRoomName(snapshot,e.room_name,e.room_port))}${e.room_port?` <span class="muted">:${esc(e.room_port)}</span>`:""}</td>
+            <td>${esc(displayRoomName(snapshot,e.room_name,e.room_port,Number(e.room_port||0)!==Number((gw.routing_port)||0)))}${e.room_port?` <span class="muted">:${esc(e.room_port)}</span>`:""}</td>
             <td class="mono">${esc(e.player_ip||"")}</td>
             <td>${hwMarkup(activityDetail(snapshot,e))}</td>
           </tr>`).join("")}</tbody>

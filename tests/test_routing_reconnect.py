@@ -62,3 +62,36 @@ def test_claim_pending_reconnect_by_id_requires_matching_ip() -> None:
     assert found is not None
     assert found.client_id == 7
     assert 7 not in server._pending_reconnects
+
+
+def test_dashboard_snapshot_marks_unpublished_active_room_as_game_room() -> None:
+    manager = titan_binary_gateway.RoutingServerManager(
+        host="127.0.0.1",
+        public_host="127.0.0.1",
+        base_port=15100,
+    )
+    server = titan_binary_gateway.SilencerRoutingServer(
+        listen_port=15102,
+        publish_in_directory=False,
+    )
+    server._native_clients[1] = titan_binary_gateway.NativeRouteClientState(
+        client_id=1,
+        client_name_raw=b"Alpha",
+        client_name="Alpha",
+        client_ip="1.2.3.4",
+        client_ip_u32=0,
+        writer=None,  # type: ignore[arg-type]
+        session_key=b"",
+        out_seq=None,
+    )
+    manager._servers[15102] = server
+
+    snapshot = manager.dashboard_snapshot()
+
+    assert snapshot["current_game_room_count"] == 1
+    assert snapshot["current_game_count"] == 0
+    assert snapshot["players"][0]["room_is_game"] is True
+    assert snapshot["servers"][0]["is_game_room"] is True
+    assert snapshot["servers"][0]["active_game_count"] == 1
+    assert snapshot["rooms"][0]["is_game_room"] is True
+    assert snapshot["rooms"][0]["active_game_count"] == 1

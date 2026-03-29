@@ -69,6 +69,7 @@ class _FakeRoutingManager:
                 {
                     "listen_port": 15100,
                     "room_display_name": "Default",
+                    "is_game_room": False,
                     "game_count": 0,
                     "data_object_count": 0,
                     "pending_reconnects": [
@@ -83,6 +84,7 @@ class _FakeRoutingManager:
                 {
                     "listen_port": 15102,
                     "room_display_name": "Fleet Battle",
+                    "is_game_room": True,
                     "game_count": 1,
                     "data_object_count": 1,
                     "pending_reconnects": [],
@@ -161,6 +163,8 @@ def test_gateway_stats_snapshot_returns_bot_safe_presence_summary() -> None:
             "password_protected": False,
             "player_count": 1,
             "game_count": 0,
+            "active_game_count": 0,
+            "is_game_room": False,
             "reconnecting_count": 1,
             "peer_data_messages": 2,
             "peer_data_bytes": 54,
@@ -176,6 +180,8 @@ def test_gateway_stats_snapshot_returns_bot_safe_presence_summary() -> None:
             "password_protected": True,
             "player_count": 1,
             "game_count": 1,
+            "active_game_count": 1,
+            "is_game_room": True,
             "reconnecting_count": 0,
             "peer_data_messages": 7,
             "peer_data_bytes": 611,
@@ -205,6 +211,105 @@ def test_gateway_stats_snapshot_returns_bot_safe_presence_summary() -> None:
             "last_activity_kind": "eof",
         }
     ]
+
+
+def test_gateway_stats_snapshot_infers_live_game_from_active_unpublished_room() -> None:
+    class _InferredGameRoutingManager:
+        def dashboard_snapshot(self) -> dict[str, object]:
+            return {
+                "current_unique_ip_count": 1,
+                "current_game_room_count": 1,
+                "players": [
+                    {
+                        "client_id": 1,
+                        "client_name": "Alpha",
+                        "room_name": "Homeworld Chat",
+                        "room_port": 15102,
+                        "connected_seconds": 45,
+                        "idle_seconds": 0,
+                        "last_activity_kind": "peer_data",
+                        "peer_data_messages": 12,
+                        "peer_data_bytes": 4096,
+                    },
+                    {
+                        "client_id": 2,
+                        "client_name": "Bravo",
+                        "room_name": "Homeworld Chat",
+                        "room_port": 15102,
+                        "connected_seconds": 44,
+                        "idle_seconds": 0,
+                        "last_activity_kind": "peer_data",
+                        "peer_data_messages": 10,
+                        "peer_data_bytes": 3072,
+                    },
+                ],
+                "servers": [
+                    {
+                        "listen_port": 15102,
+                        "room_name": "Homeworld Chat",
+                        "room_description": "Homeworld Chat",
+                        "room_path": "/Homeworld",
+                        "published": False,
+                        "room_password_set": False,
+                        "player_count": 2,
+                        "game_count": 0,
+                        "active_game_count": 1,
+                        "is_game_room": True,
+                    }
+                ],
+                "games": [],
+                "rooms": [
+                    {
+                        "listen_port": 15102,
+                        "room_display_name": "Homeworld Chat",
+                        "is_game_room": True,
+                        "active_game_count": 1,
+                        "game_count": 0,
+                        "data_object_count": 0,
+                        "pending_reconnects": [],
+                    }
+                ],
+            }
+
+    gateway = titan_binary_gateway.BinaryGatewayServer(
+        "127.0.0.1",
+        9100,
+        public_host="homeworld.kerrbell.dev",
+        public_port=15101,
+        routing_port=15100,
+        valid_versions=["0110"],
+    )
+    gateway.routing_manager = _InferredGameRoutingManager()
+
+    snapshot = gateway.stats_snapshot()
+
+    assert snapshot["counts"]["games_live"] == 1
+    assert [player["state"] for player in snapshot["players"]] == ["game", "game"]
+    assert snapshot["rooms"] == [
+        {
+            "name": "Homeworld Chat",
+            "port": 15102,
+            "description": "Homeworld Chat",
+            "path": "/Homeworld",
+            "published": False,
+            "password_protected": False,
+            "player_count": 2,
+            "game_count": 0,
+            "active_game_count": 1,
+            "is_game_room": True,
+            "reconnecting_count": 0,
+            "peer_data_messages": 22,
+            "peer_data_bytes": 7168,
+            "game_data_bytes": 0,
+            "data_object_count": 0,
+        }
+    ]
+    assert snapshot["traffic"] == {
+        "peer_data_messages_total": 22,
+        "peer_data_bytes_total": 7168,
+        "game_object_count": 0,
+        "game_object_bytes_total": 0,
+    }
 
 
 def test_stats_token_is_scoped_to_stats_endpoint() -> None:

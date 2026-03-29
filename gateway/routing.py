@@ -674,6 +674,13 @@ class SilencerRoutingServer:
                 }
             )
 
+        room_peer_data_messages = sum(
+            int(client["peer_data_messages"]) for client in clients
+        )
+        room_peer_data_bytes = sum(
+            int(client["peer_data_bytes"]) for client in clients
+        )
+
         games = []
         for data_object in self._data_objects.values():
             owner = client_lookup.get(data_object.owner_id)
@@ -706,6 +713,17 @@ class SilencerRoutingServer:
                 }
             )
 
+        is_game_room = bool(
+            not self._publish_in_directory
+            and (
+                clients
+                or pending_reconnects
+                or data_objects
+                or room_peer_data_messages
+                or room_peer_data_bytes
+            )
+        )
+
         return {
             "listen_port": self.listen_port,
             "publish_in_directory": self._publish_in_directory,
@@ -716,6 +734,8 @@ class SilencerRoutingServer:
             "room_password_set": bool(self._room_password),
             "room_flags": self._room_flags,
             "room_path": self._room_path,
+            "is_game_room": is_game_room,
+            "active_game_count": 1 if is_game_room else 0,
             "native_client_count": len(clients),
             "pending_reconnect_count": len(pending_reconnects),
             "pending_reconnects": pending_reconnects,
@@ -723,6 +743,8 @@ class SilencerRoutingServer:
             "clients": clients,
             "game_count": len(games),
             "games": games,
+            "peer_data_messages": room_peer_data_messages,
+            "peer_data_bytes": room_peer_data_bytes,
             "data_object_count": len(data_objects),
             "data_objects": data_objects,
             "conflict_data_len": len(self._conflict_data),
@@ -1966,9 +1988,13 @@ class RoutingServerManager:
         servers: list[Dict[str, object]] = []
         live_games: list[Dict[str, object]] = []
         current_ips: set[str] = set()
+        current_game_room_count = 0
 
         for room in room_snapshots:
             room_players = []
+            room_is_game = bool(room.get("is_game_room"))
+            if room_is_game:
+                current_game_room_count += 1
             for client in room.get("clients", []):
                 player_entry = {
                     "client_id": client.get("client_id"),
@@ -1983,6 +2009,7 @@ class RoutingServerManager:
                     "peer_data_bytes": client.get("peer_data_bytes", 0),
                     "room_port": room.get("listen_port"),
                     "room_name": room.get("room_display_name"),
+                    "room_is_game": room_is_game,
                     "room_path": room.get("room_path"),
                     "room_password_set": room.get("room_password_set", False),
                 }
@@ -2010,6 +2037,10 @@ class RoutingServerManager:
                     "room_password_set": room.get("room_password_set", False),
                     "room_flags": room.get("room_flags", 0),
                     "player_count": len(room_players),
+                    "is_game_room": room_is_game,
+                    "active_game_count": room.get("active_game_count", 1 if room_is_game else 0),
+                    "peer_data_messages": room.get("peer_data_messages", 0),
+                    "peer_data_bytes": room.get("peer_data_bytes", 0),
                     "players": room_players,
                     "game_count": len(room_games),
                     "games": room_games,
@@ -2031,6 +2062,7 @@ class RoutingServerManager:
             "published_room_count": sum(1 for room in room_snapshots if room.get("published")),
             "current_player_count": len(players),
             "current_unique_ip_count": len(current_ips),
+            "current_game_room_count": current_game_room_count,
             "current_game_count": len(live_games),
             "players": players,
             "servers": servers,

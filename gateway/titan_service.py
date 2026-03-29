@@ -252,7 +252,7 @@ class BinaryGatewayServer:
         players_raw = routing_snapshot.get("players", [])
         games_raw = routing_snapshot.get("games", [])
 
-        room_has_games: Dict[int, bool] = {}
+        room_is_game: Dict[int, bool] = {}
         room_reconnect_counts: Dict[int, int] = {}
         room_data_object_counts: Dict[int, int] = {}
         room_peer_data_messages: Dict[int, int] = {}
@@ -264,7 +264,7 @@ class BinaryGatewayServer:
             if not isinstance(room, dict):
                 continue
             port = int(room.get("listen_port") or 0)
-            room_has_games[port] = bool(room.get("game_count", 0) or room.get("games"))
+            room_is_game[port] = bool(room.get("is_game_room", False))
             room_data_object_counts[port] = int(
                 room.get("data_object_count")
                 or len(room.get("data_objects", []) or [])
@@ -302,8 +302,9 @@ class BinaryGatewayServer:
                     "room_name": str(player.get("room_name") or ""),
                     "room_port": room_port,
                     # Retail routing does not expose a dedicated per-player presence
-                    # flag, so we infer "game" from whether the room has live games.
-                    "state": "game" if room_has_games.get(room_port, False) else "lobby",
+                    # flag, so we infer "game" from whether the player is in an
+                    # active unpublished routing room.
+                    "state": "game" if room_is_game.get(room_port, False) else "lobby",
                     "connected_seconds": int(player.get("connected_seconds") or 0),
                     "idle_seconds": int(player.get("idle_seconds") or 0),
                     "last_activity_kind": str(player.get("last_activity_kind") or ""),
@@ -327,6 +328,8 @@ class BinaryGatewayServer:
                     "password_protected": bool(room.get("room_password_set", False)),
                     "player_count": int(room.get("player_count") or 0),
                     "game_count": int(room.get("game_count") or 0),
+                    "active_game_count": 1 if room_is_game.get(port, False) else 0,
+                    "is_game_room": bool(room_is_game.get(port, False)),
                     "reconnecting_count": int(room_reconnect_counts.get(port, 0)),
                     "peer_data_messages": int(room_peer_data_messages.get(port, 0)),
                     "peer_data_bytes": int(room_peer_data_bytes.get(port, 0)),
@@ -379,7 +382,7 @@ class BinaryGatewayServer:
                 "players_online": len(players),
                 "rooms_open": len(rooms),
                 "rooms_published": sum(1 for room in rooms if room["published"]),
-                "games_live": len(games),
+                "games_live": sum(1 for room in rooms if room["is_game_room"]),
                 "unique_ips": int(routing_snapshot.get("current_unique_ip_count") or 0),
                 "players_reconnecting": len(reconnecting_players),
             },
