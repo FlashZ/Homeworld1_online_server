@@ -260,3 +260,23 @@ def test_admin_broadcast_chat_uses_visible_room_chat_sender() -> None:
     assert sender_id == titan_binary_gateway.ADMIN_BROADCAST_CLIENT_ID
     assert chat_type == titan_binary_gateway.CHAT_GROUP_ID
     assert payload[6 : 6 + data_len].decode("utf-16-le") == "Second notice"
+
+
+def test_routing_client_list_entries_include_admin_sender() -> None:
+    server = titan_binary_gateway.SilencerRoutingServer()
+    server._native_clients[5] = titan_binary_gateway.NativeRouteClientState(
+        client_id=5,
+        client_name_raw="Alpha".encode("utf-16-le"),
+        client_name="Alpha",
+        client_ip="1.2.3.4",
+        client_ip_u32=0x01020304,
+        writer=None,  # type: ignore[arg-type]
+        session_key=b"",
+        out_seq=None,
+    )
+
+    entries = server._routing_client_list_entries()
+
+    assert [entry[0] for entry in entries] == [5, titan_binary_gateway.ADMIN_BROADCAST_CLIENT_ID]
+    assert entries[-1][1] == titan_binary_gateway.ADMIN_BROADCAST_CLIENT_NAME_RAW
+    assert entries[-1][2] == titan_binary_gateway.ADMIN_BROADCAST_CLIENT_IP_U32

@@ -2526,6 +2526,21 @@ class SilencerRoutingServer:
             return False
         return svc == AUTH1_PEER_SERVICE_TYPE and msg == AUTH1_PEER_REQUEST
 
+    def _routing_client_list_entries(self) -> list[Tuple[int, bytes, int]]:
+        clients = [
+            (client.client_id, client.client_name_raw, client.client_ip_u32)
+            for client in self._native_clients.values()
+        ]
+        if clients:
+            clients.append(
+                (
+                    ADMIN_BROADCAST_CLIENT_ID,
+                    ADMIN_BROADCAST_CLIENT_NAME_RAW,
+                    ADMIN_BROADCAST_CLIENT_IP_U32,
+                )
+            )
+        return clients
+
     async def _send_native_route_reply(
         self,
         writer: asyncio.StreamWriter,
@@ -3106,10 +3121,7 @@ class SilencerRoutingServer:
                         continue
 
                     if service_type == MINI_ROUTING_SERVICE and message_type == ROUTING_GET_CLIENT_LIST:
-                        clients = [
-                            (client.client_id, client.client_name_raw, client.client_ip_u32)
-                            for client in self._native_clients.values()
-                        ]
+                        clients = self._routing_client_list_entries()
                         LOGGER.info(
                             "Routing(native): GetClientList from %s:%s (%d clients)",
                             *peer, len(clients),
@@ -3122,6 +3134,7 @@ class SilencerRoutingServer:
                         )
                         if registered_client_id and registered_client_id in self._native_clients:
                             self._native_clients[registered_client_id].out_seq = out_seq
+                            self._native_clients[registered_client_id].admin_sender_announced = True
                         continue
 
                     if service_type == MINI_ROUTING_SERVICE and message_type == ROUTING_SUBSCRIBE_DATA_OBJECT:
