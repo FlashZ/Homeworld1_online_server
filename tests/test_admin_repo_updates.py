@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 import struct
 
 import titan_binary_gateway
@@ -280,3 +281,14 @@ def test_routing_client_list_entries_include_admin_sender() -> None:
     assert [entry[0] for entry in entries] == [5, titan_binary_gateway.ADMIN_BROADCAST_CLIENT_ID]
     assert entries[-1][1] == titan_binary_gateway.ADMIN_BROADCAST_CLIENT_NAME_RAW
     assert entries[-1][2] == titan_binary_gateway.ADMIN_BROADCAST_CLIENT_IP_U32
+
+
+def test_admin_dashboard_default_repo_monitor_uses_repo_root() -> None:
+    dashboard = titan_binary_gateway.AdminDashboardServer(
+        gateway=_FakeGateway(),
+        db_path="won_server.db",
+        log_handler=titan_binary_gateway.DashboardLogHandler(),
+        admin_token="admin-secret",
+    )
+
+    assert dashboard.repo_monitor.repo_path == Path(titan_binary_gateway.__file__).resolve().parent
