@@ -19,11 +19,16 @@ The shared-edge path is intended for active testing and validation, not a “ret
 ## Quick start (Docker)
 
 ```bash
-cp .env.example .env        # then edit PRODUCT, PORT_BIND_IP, PUBLIC_HOST, BACKEND_SHARED_SECRET, and ADMIN_TOKEN
+cp .env.example .env        # then edit PRODUCT or SHARED_EDGE, plus PUBLIC_HOST, BACKEND_SHARED_SECRET, and ADMIN_TOKEN
 docker compose up -d --build
 ```
 
-This builds one Docker image, then runs two containers from it: `backend` and `gateway`. Set `PRODUCT=homeworld` or `PRODUCT=cataclysm` in `.env` to choose the active retail profile for that stack. Compose now keeps each product in its own data root under `./data/<product>/`.
+This builds one Docker image, then runs the gateway plus the backend containers it needs for the selected mode:
+
+- single-product mode: `backend`, `backend-cataclysm` (idle), and `gateway`
+- shared-edge mode: `backend` (Homeworld), `backend-cataclysm` (Cataclysm), and `gateway`
+
+Set `PRODUCT=homeworld` or `PRODUCT=cataclysm` in `.env` for a single-product stack. Set `SHARED_EDGE=1` to launch one public gateway that fronts both games at once while keeping separate internal backends and per-product data roots under `./data/<product>/`.
 
 Ports to expose:
 
@@ -121,7 +126,21 @@ Security defaults:
 
 ### Docker details
 
-Copy `.env.example` to `.env` and set at least `PRODUCT`, `PORT_BIND_IP`, `PUBLIC_HOST`, `BACKEND_SHARED_SECRET`, and `ADMIN_TOKEN`. The default compose layout now keeps each stack under `data/<product>/`, so Homeworld and Cataclysm no longer share one flat DB/keys path by accident.
+Copy `.env.example` to `.env` and set at least `PUBLIC_HOST`, `BACKEND_SHARED_SECRET`, and `ADMIN_TOKEN`.
+
+For a single-product stack, also set:
+
+- `PRODUCT=homeworld` or `PRODUCT=cataclysm`
+- `SHARED_EDGE=0`
+
+For a dual-product shared edge, set:
+
+- `SHARED_EDGE=1`
+- `EDGE_DEFAULT_PRODUCT=homeworld` or `EDGE_DEFAULT_PRODUCT=cataclysm`
+- `BACKEND_PORT=9100`
+- `CATACLYSM_BACKEND_PORT=9101`
+
+The compose layout keeps state under `data/<product>/`, so Homeworld and Cataclysm no longer share one flat DB/keys path by accident.
 
 ```bash
 docker compose up -d --build   # start
@@ -132,6 +151,7 @@ docker compose down            # stop
 Compose now starts two services from the same image:
 
 - `backend` runs `won_server.py` on the internal Docker network only.
+- `backend-cataclysm` runs the Cataclysm backend only when `SHARED_EDGE=1`; otherwise it stays idle.
 - `gateway` runs `titan_binary_gateway.py` and publishes the retail-facing ports plus a localhost-only admin dashboard.
 
 The shared `./data` bind mount now holds product-scoped state such as:
@@ -145,13 +165,36 @@ There is no custom Docker entrypoint or sidecar supervisor in this setup. Compos
 
 Useful environment knobs:
 
-- `PRODUCT` selects the active product profile for both the backend and gateway. Use `homeworld` or `cataclysm`.
+- `PRODUCT` selects the active profile for single-product mode. Use `homeworld` or `cataclysm`.
+- `SHARED_EDGE=1` switches Docker into one-gateway/two-backend mode so Homeworld and Cataclysm can share the same public retail edge.
+- `EDGE_DEFAULT_PRODUCT` chooses which product profile acts as the shared-edge default when an early request is ambiguous. Leave it at `homeworld` unless you have a reason to prefer Cataclysm.
 - `PORT_BIND_IP` controls which host IP Docker publishes the retail ports on. Leave it at `0.0.0.0` for one stack, or pin separate stacks to separate host IPs.
 - `BACKEND_SHARED_SECRET` is required in Docker because the gateway talks to the backend over the Compose bridge network instead of container-local loopback.
 - `ADMIN_TOKEN` is required in Docker because the gateway must bind the dashboard on `0.0.0.0` inside the container before Docker can publish it back to `127.0.0.1` on the host.
-- `BACKEND_PORT`, `GATEWAY_PORT`, `ROUTING_PORT`, `ROUTING_MAX_PORT`, `FIREWALL_PORT`, and `ADMIN_PORT` let you remap the container listeners if needed.
+- `BACKEND_PORT` and `CATACLYSM_BACKEND_PORT` choose the internal backend listener ports for shared-edge mode.
+- `GATEWAY_PORT`, `ROUTING_PORT`, `ROUTING_MAX_PORT`, `FIREWALL_PORT`, and `ADMIN_PORT` let you remap the gateway listeners if needed.
 
-If you want to run Homeworld and Cataclysm at the same time in Docker today, the default Compose file still assumes one product per stack. Use two Compose projects with different `.env` files, different `PRODUCT` values, and either different `PORT_BIND_IP` values or different port mappings, or run the experimental shared-edge mode manually from Python while keeping two separate backend processes behind it.
+Shared-edge mode uses the configured routing range for both games and lets the gateway split it internally between Homeworld and Cataclysm. With the defaults, Homeworld gets `15100-15109` and Cataclysm gets `15110-15120`.
+
+To run both games together from Docker:
+
+```bash
+cp .env.example .env
+# edit .env:
+#   SHARED_EDGE=1
+#   EDGE_DEFAULT_PRODUCT=homeworld
+#   PUBLIC_HOST=your.public.ip.or.dns
+#   BACKEND_SHARED_SECRET=...
+#   ADMIN_TOKEN=...
+docker compose up -d --build
+docker compose logs -f gateway
+```
+
+On startup you should see log lines like:
+
+- `Shared-edge runtime: homeworld ...`
+- `Shared-edge runtime: cataclysm ...`
+- `Titan binary gateway listening on (...) -> shared edge`
 
 ## Architecture
 
