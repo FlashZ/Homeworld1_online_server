@@ -9,10 +9,13 @@ from pathlib import Path
 import secrets
 import sqlite3
 import time
-from typing import Any, Deque, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Deque, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlsplit
 
 from .repo_monitor import GitRepoMonitor
+
+if TYPE_CHECKING:
+    from .titan_service import BinaryGatewayServer
 
 LOGGER = logging.getLogger(__name__)
 
@@ -418,51 +421,221 @@ class AdminDashboardServer:
       if(!name||name==="shared-edge")return "";
       return `[${name}] `;
     }
-    function routingGameStats(snapshot){
-      const rt=(snapshot.gateway||{}).routing_manager||{};
-      const servers=rt.servers||[];
-      const roomSnapshots=rt.rooms||[];
-      const players=rt.players||[];
-      const gamePorts=new Set();
-      const roomStateByPort=new Map();
-      let gameRooms=0;
-      let liveGames=0;
-      let liveGameObjects=0;
-      let reconnecting=0;
-      let peerMsgs=0;
-      let peerBytes=0;
-      let gameObjectBytes=0;
-      for(const room of servers){
+    function knownProductOrder(product){
+      const name=String(product||"").trim().toLowerCase();
+      if(name==="homeworld")return 0;
+      if(name==="cataclysm")return 1;
+      return 10;
+    }
+    function sortedProductKeys(values){
+      return [...new Set((values||[]).map(v=>String(v||"").trim()).filter(Boolean))].sort((a,b)=>{
+        const orderDiff=knownProductOrder(a)-knownProductOrder(b);
+        return orderDiff||a.localeCompare(b);
+      });
+    }
+    function defaultSnapshotProduct(snapshot){
+      const gw=snapshot.gateway||{};
+      const runtimeKeys=sortedProductKeys(Object.keys(gw.products||{}));
+      if(runtimeKeys.length===1)return runtimeKeys[0];
+      const product=String(gw.product||"").trim();
+      if(product&&product!=="shared-edge")return product;
+      return runtimeKeys[0]||"";
+    }
+    function snapshotProductKeys(snapshot){
+      const gw=snapshot.gateway||{};
+      const runtimeKeys=sortedProductKeys(Object.keys(gw.products||{}));
+      if(runtimeKeys.length)return runtimeKeys;
+      const fallback=defaultSnapshotProduct(snapshot);
+      return fallback?[fallback]:[];
+    }
+    function snapshotProductInfo(snapshot,product){
+      const gw=snapshot.gateway||{};
+      if(gw.products&&gw.products[product])return gw.products[product]||{};
+      return {
+        community_name: gw.community_name||"",
+        directory_root: gw.directory_root||"",
+        routing_port: gw.routing_port||0,
+        backend_host: gw.backend_host||"",
+        backend_port: gw.backend_port||0,
+        version_str: gw.version_str||"",
+        valid_versions: gw.valid_versions||[],
+      };
+    }
+    function rowProduct(snapshot,row){
+      const product=String((row&&row.product)||"").trim();
+      return product||defaultSnapshotProduct(snapshot)||"unknown";
+    }
+    function productMetrics(snapshot){
+      const gw=snapshot.gateway||{};
+      const rt=gw.routing_manager||{};
+      const byProduct={};
+      function freshBucket(product){
+        return {
+          product,
+          info:snapshotProductInfo(snapshot,product),
+          playersOnline:0,
+          playersInGame:0,
+          playersInLobby:0,
+          reconnecting:0,
+          activeRooms:0,
+          publishedRooms:0,
+          gameRooms:0,
+          liveGames:0,
+          liveGameObjects:0,
+          uniqueIps:0,
+          totalIpsSeen:0,
+          peerMsgs:0,
+          peerBytes:0,
+          gameObjectBytes:0,
+          joins:0,
+          leaves:0,
+          chats:0,
+          broadcasts:0,
+          gamePorts:new Set(),
+          _ipSet:new Set(),
+        };
+      }
+      function ensureBucket(product){
+        const key=String(product||defaultSnapshotProduct(snapshot)||"unknown").trim();
+        if(!byProduct[key])byProduct[key]=freshBucket(key);
+        return byProduct[key];
+      }
+      const overall=freshBucket("all");
+      overall.info={};
+      const roomStateByKey=new Map();
+      snapshotProductKeys(snapshot).forEach(product=>ensureBucket(product));
+
+      for(const room of rt.servers||[]){
+        const product=rowProduct(snapshot,room);
+        const bucket=ensureBucket(product);
         const port=Number(room.listen_port||0);
         const isGameRoom=!!room.is_game_room||Number(room.active_game_count||0)>0;
         const games=Array.isArray(room.games)?room.games:[];
-        roomStateByPort.set(port,isGameRoom);
+        roomStateByKey.set(`${product}:${port}`,isGameRoom);
+        bucket.activeRooms+=1;
+        overall.activeRooms+=1;
+        if(room.published){
+          bucket.publishedRooms+=1;
+          overall.publishedRooms+=1;
+        }
         if(isGameRoom){
-          gameRooms+=1;
-          if(port)gamePorts.add(port);
+          bucket.gameRooms+=1;
+          bucket.liveGames+=1;
+          overall.gameRooms+=1;
+          overall.liveGames+=1;
+          if(port){
+            bucket.gamePorts.add(port);
+            overall.gamePorts.add(port);
+          }
         }
-        liveGameObjects+=games.length;
+        bucket.liveGameObjects+=games.length;
+        overall.liveGameObjects+=games.length;
         for(const game of games){
-          gameObjectBytes+=Number(game.data_len||0);
+          const dataLen=Number(game.data_len||0);
+          bucket.gameObjectBytes+=dataLen;
+          overall.gameObjectBytes+=dataLen;
         }
       }
-      liveGames=Number(rt.current_game_room_count||gameRooms);
-      for(const room of roomSnapshots){
-        reconnecting+=Number(room.pending_reconnect_count||0);
+
+      for(const room of rt.rooms||[]){
+        const product=rowProduct(snapshot,room);
+        const bucket=ensureBucket(product);
         const port=Number(room.listen_port||0);
-        if(!roomStateByPort.has(port)){
-          roomStateByPort.set(port,!!room.is_game_room||Number(room.active_game_count||0)>0);
+        const reconnectCount=Number(
+          room.pending_reconnect_count!=null
+            ? room.pending_reconnect_count
+            : Array.isArray(room.pending_reconnects)
+              ? room.pending_reconnects.length
+              : 0
+        );
+        bucket.reconnecting+=reconnectCount;
+        overall.reconnecting+=reconnectCount;
+        if(!roomStateByKey.has(`${product}:${port}`)){
+          roomStateByKey.set(
+            `${product}:${port}`,
+            !!room.is_game_room||Number(room.active_game_count||0)>0
+          );
         }
       }
-      let inGamePlayers=0;
-      let lobbyPlayers=0;
-      for(const player of players){
-        peerMsgs+=Number(player.peer_data_messages||0);
-        peerBytes+=Number(player.peer_data_bytes||0);
-        if(roomStateByPort.get(Number(player.room_port||0)))inGamePlayers+=1;
-        else lobbyPlayers+=1;
+
+      for(const player of rt.players||[]){
+        const product=rowProduct(snapshot,player);
+        const bucket=ensureBucket(product);
+        const port=Number(player.room_port||0);
+        const isGameRoom=!!roomStateByKey.get(`${product}:${port}`);
+        const peerMsgs=Number(player.peer_data_messages||0);
+        const peerBytes=Number(player.peer_data_bytes||0);
+        const clientIp=String(player.client_ip||"").trim();
+        bucket.playersOnline+=1;
+        overall.playersOnline+=1;
+        bucket.peerMsgs+=peerMsgs;
+        overall.peerMsgs+=peerMsgs;
+        bucket.peerBytes+=peerBytes;
+        overall.peerBytes+=peerBytes;
+        if(clientIp){
+          bucket._ipSet.add(clientIp);
+          overall._ipSet.add(clientIp);
+        }
+        if(isGameRoom){
+          bucket.playersInGame+=1;
+          overall.playersInGame+=1;
+        }else{
+          bucket.playersInLobby+=1;
+          overall.playersInLobby+=1;
+        }
       }
-      return {gamePorts,inGamePlayers,lobbyPlayers,gameRooms,liveGames,liveGameObjects,reconnecting,peerMsgs,peerBytes,gameObjectBytes};
+
+      for(const entry of gw.activity||[]){
+        const bucket=ensureBucket(rowProduct(snapshot,entry));
+        const overallKind=String(entry.kind||"");
+        if(overallKind==="join"||overallKind==="rejoin"){
+          bucket.joins+=1;
+          overall.joins+=1;
+        }else if(overallKind==="leave"){
+          bucket.leaves+=1;
+          overall.leaves+=1;
+        }else if(overallKind==="chat"){
+          bucket.chats+=1;
+          overall.chats+=1;
+        }else if(overallKind==="broadcast"){
+          bucket.broadcasts+=1;
+          overall.broadcasts+=1;
+        }
+      }
+
+      for(const row of gw.ip_metrics||[]){
+        overall.totalIpsSeen+=1;
+        const products=sortedProductKeys(row.products||[]);
+        const targets=products.length?products:[defaultSnapshotProduct(snapshot)].filter(Boolean);
+        for(const product of targets){
+          ensureBucket(product).totalIpsSeen+=1;
+        }
+      }
+
+      const keys=sortedProductKeys(Object.keys(byProduct));
+      for(const product of keys){
+        const bucket=byProduct[product];
+        bucket.uniqueIps=bucket._ipSet.size;
+        delete bucket._ipSet;
+      }
+      overall.uniqueIps=overall._ipSet.size;
+      delete overall._ipSet;
+      return {keys,byProduct,overall,roomStateByKey};
+    }
+    function routingGameStats(snapshot){
+      const metrics=productMetrics(snapshot);
+      return {
+        gamePorts:metrics.overall.gamePorts,
+        inGamePlayers:metrics.overall.playersInGame,
+        lobbyPlayers:metrics.overall.playersInLobby,
+        gameRooms:metrics.overall.gameRooms,
+        liveGames:metrics.overall.liveGames,
+        liveGameObjects:metrics.overall.liveGameObjects,
+        reconnecting:metrics.overall.reconnecting,
+        peerMsgs:metrics.overall.peerMsgs,
+        peerBytes:metrics.overall.peerBytes,
+        gameObjectBytes:metrics.overall.gameObjectBytes,
+      };
     }
     function activityDetail(snapshot,event){
       const text=String(event.text||"").trim();
@@ -569,21 +742,54 @@ class AdminDashboardServer:
 
     function renderOverview(snapshot){
       const gw=snapshot.gateway||{};const rt=gw.routing_manager||{};const am=gw.activity_metrics||{};const db=snapshot.db||{};const repo=snapshot.repo||{};
-      const gameStats=routingGameStats(snapshot);
+      const metrics=productMetrics(snapshot);
+      const gameStats=metrics.overall;
       const banned=gw.banned_ips||[];
+      const productCards=metrics.keys.map(product=>{
+        const bucket=metrics.byProduct[product];
+        const info=bucket.info||{};
+        return `<div class="card">
+          <h2>${productBadge(product)}${esc(info.community_name||product)}</h2>
+          <div class="kv">
+            <div class="k">Directory Root</div><div class="v">${esc(info.directory_root||"")}</div>
+            <div class="k">Routing Port</div><div class="v">${esc(info.routing_port||0)}</div>
+            <div class="k">Backend</div><div class="v">${esc(info.backend_host||"")}:${esc(info.backend_port||0)}</div>
+            <div class="k">Version</div><div class="v">${esc(info.version_str||"")}</div>
+            <div class="k">Valid Versions</div><div class="v">${(info.valid_versions||[]).map(v=>`<span class="pill" style="margin-left:0;margin-right:4px;">${esc(v)}</span>`).join("")||'<span class="muted">n/a</span>'}</div>
+            <div class="k">Players Online</div><div class="v">${esc(bucket.playersOnline)}</div>
+            <div class="k">Players In Game</div><div class="v">${esc(bucket.playersInGame)}</div>
+            <div class="k">Players In Lobby</div><div class="v">${esc(bucket.playersInLobby)}</div>
+            <div class="k">Reconnect Holds</div><div class="v">${esc(bucket.reconnecting)}</div>
+            <div class="k">Active Rooms</div><div class="v">${esc(bucket.activeRooms)}</div>
+            <div class="k">Game Rooms</div><div class="v">${esc(bucket.gameRooms)}</div>
+            <div class="k">Live Games</div><div class="v">${esc(bucket.liveGames)}</div>
+            <div class="k">Unique IPs</div><div class="v">${esc(bucket.uniqueIps)}</div>
+            <div class="k">IPs Seen</div><div class="v">${esc(bucket.totalIpsSeen)}</div>
+            <div class="k">Peer Data Msgs</div><div class="v">${esc(bucket.peerMsgs)}</div>
+            <div class="k">Peer Data Bytes</div><div class="v">${esc(bucket.peerBytes)}</div>
+            <div class="k">Game Obj Bytes</div><div class="v">${esc(bucket.gameObjectBytes)}</div>
+            <div class="k">Joins / Leaves</div><div class="v">${esc(bucket.joins)} / ${esc(bucket.leaves)}</div>
+            <div class="k">Chat / Broadcasts</div><div class="v">${esc(bucket.chats)} / ${esc(bucket.broadcasts)}</div>
+          </div>
+        </div>`;
+      }).join("");
       return `
         <div class="stat-grid">
-          <div class="stat-card"><div class="label">Players Online</div><div class="value accent">${esc(rt.current_player_count||0)}</div></div>
-          <div class="stat-card"><div class="label">Players In Game</div><div class="value success">${esc(gameStats.inGamePlayers)}</div></div>
-          <div class="stat-card"><div class="label">Players In Lobby</div><div class="value">${esc(gameStats.lobbyPlayers)}</div></div>
+          <div class="stat-card"><div class="label">Players Online</div><div class="value accent">${esc(gameStats.playersOnline)}</div></div>
+          <div class="stat-card"><div class="label">Players In Game</div><div class="value success">${esc(gameStats.playersInGame)}</div></div>
+          <div class="stat-card"><div class="label">Players In Lobby</div><div class="value">${esc(gameStats.playersInLobby)}</div></div>
           <div class="stat-card"><div class="label">Reconnecting</div><div class="value warning">${esc(gameStats.reconnecting)}</div></div>
-          <div class="stat-card"><div class="label">Active Rooms</div><div class="value">${esc(rt.room_count||0)}</div></div>
+          <div class="stat-card"><div class="label">Active Rooms</div><div class="value">${esc(gameStats.activeRooms||rt.room_count||0)}</div></div>
           <div class="stat-card"><div class="label">Game Rooms</div><div class="value">${esc(gameStats.gameRooms)}</div></div>
           <div class="stat-card"><div class="label">Live Games</div><div class="value success">${esc(gameStats.liveGames)}</div></div>
-          <div class="stat-card"><div class="label">Unique IPs</div><div class="value">${esc(rt.current_unique_ip_count||0)}</div></div>
+          <div class="stat-card"><div class="label">Unique IPs</div><div class="value">${esc(gameStats.uniqueIps||rt.current_unique_ip_count||0)}</div></div>
           <div class="stat-card"><div class="label">Peer Data</div><div class="value">${esc(gameStats.peerBytes)}<span style="font-size:13px;color:var(--text-2);margin-left:6px;">bytes</span></div></div>
           <div class="stat-card"><div class="label">Game Obj Bytes</div><div class="value">${esc(gameStats.gameObjectBytes)}<span style="font-size:13px;color:var(--text-2);margin-left:6px;">bytes</span></div></div>
         </div>
+        ${productCards?`<div class="card">
+          <h2>Per-Product Live Status</h2>
+          <div class="card-grid">${productCards}</div>
+        </div>`:""}
         <div class="card-grid">
           <div class="card">
             <h2>Server Info</h2>
@@ -605,15 +811,16 @@ class AdminDashboardServer:
           <div class="card">
             <h2>Activity Counters</h2>
             <div class="kv">
-              <div class="k">Joins</div><div class="v">${esc(am.join_count||0)}</div>
-              <div class="k">Leaves</div><div class="v">${esc(am.leave_count||0)}</div>
-              <div class="k">Chat Messages</div><div class="v">${esc(am.chat_count||0)}</div>
+              <div class="k">Joins</div><div class="v">${esc(gameStats.joins||am.join_count||0)}</div>
+              <div class="k">Leaves</div><div class="v">${esc(gameStats.leaves||am.leave_count||0)}</div>
+              <div class="k">Chat Messages</div><div class="v">${esc(gameStats.chats||am.chat_count||0)}</div>
+              <div class="k">Broadcasts</div><div class="v">${esc(gameStats.broadcasts||0)}</div>
               <div class="k">Peer Data Msgs</div><div class="v">${esc(gameStats.peerMsgs)}</div>
               <div class="k">Rooms Opened</div><div class="v">${esc(am.room_open_count||0)}</div>
               <div class="k">Active Game Rooms</div><div class="v">${esc(gameStats.gameRooms)}</div>
               <div class="k">Live Game Objects</div><div class="v">${esc(gameStats.liveGameObjects)}</div>
               <div class="k">Reconnect Holds</div><div class="v">${esc(gameStats.reconnecting)}</div>
-              <div class="k">IPs Seen (total)</div><div class="v">${esc(am.unique_ip_count||0)}</div>
+              <div class="k">IPs Seen (total)</div><div class="v">${esc(gameStats.totalIpsSeen||am.unique_ip_count||0)}</div>
             </div>
             <h3>Database</h3>
             <div class="kv">
@@ -655,75 +862,122 @@ class AdminDashboardServer:
     }
 
     function renderPlayers(snapshot){
-      const rt=(snapshot.gateway||{}).routing_manager||{};const players=rt.players||[];const gameStats=routingGameStats(snapshot);
+      const rt=(snapshot.gateway||{}).routing_manager||{};const players=rt.players||[];const metrics=productMetrics(snapshot);
       if(!players.length)return '<div class="card"><h2>Players</h2><p class="muted">No live players connected.</p></div>';
-      return `<div class="card"><h2>Players <span class="pill">${players.length}</span></h2>
-        <div class="table-wrap"><table>
-          <thead><tr><th>Player</th><th>State</th><th>IP</th><th>Room</th><th>Chat</th><th>Connected</th><th>Idle</th><th style="width:120px">Actions</th></tr></thead>
-          <tbody>${players.map(p=>`<tr>
-            <td>${productBadge(p.product)}${hwMarkup(p.client_name)}</td>
-            <td>${gameStats.gamePorts.has(Number(p.room_port||0))?'<span class="badge badge-join">game</span>':'<span class="badge badge-default">lobby</span>'}</td>
-            <td class="mono">${esc(p.client_ip)}</td>
-            <td>${esc(displayRoomName(snapshot,p.room_name,p.room_port,gameStats.gamePorts.has(Number(p.room_port||0))))} <span class="muted">:${esc(p.room_port)}</span></td>
-            <td>${esc(p.chat_count)}</td>
-            <td>${age(p.connected_seconds)}</td>
-            <td>${age(p.idle_seconds)}</td>
-            <td><button class="btn btn-danger btn-sm" data-action="kick" data-room-port="${esc(p.room_port)}" data-client-id="${esc(p.client_id)}">Kick</button> <button class="btn btn-danger btn-sm" data-action="ban-ip" data-ip="${esc(p.client_ip)}">Ban</button></td>
-          </tr>`).join("")}</tbody>
-        </table></div>
-        ${players.map(p=>`<details><summary>${productBadge(p.product)}${hwMarkup(p.client_name)} <span class="muted">${esc(p.client_ip)} &middot; ${esc(displayRoomName(snapshot,p.room_name,p.room_port,gameStats.gamePorts.has(Number(p.room_port||0))))}:${esc(p.room_port)}</span></summary>
-          <div class="kv" style="padding:8px 0;">
-            <div class="k">Product</div><div class="v">${esc(p.product||"")}</div>
-            <div class="k">Client ID</div><div class="v">${esc(p.client_id)}</div>
-            <div class="k">Name</div><div class="v">${hwPlain(p.client_name)}</div>
-            <div class="k">State</div><div class="v">${gameStats.gamePorts.has(Number(p.room_port||0))?"In Game":"Lobby"}</div>
-            <div class="k">Subscriptions</div><div class="v">${esc(p.subscription_count)}</div>
-            <div class="k">Peer Data Msgs</div><div class="v">${esc(p.peer_data_messages)}</div>
-            <div class="k">Peer Data Bytes</div><div class="v">${esc(p.peer_data_bytes)}</div>
-            <div class="k">Last Activity</div><div class="v">${esc(p.last_activity_kind)}</div>
-          </div></details>`).join("")}
-      </div>`;
+      const grouped={};
+      for(const player of players){
+        const product=rowProduct(snapshot,player);
+        if(!grouped[product])grouped[product]=[];
+        grouped[product].push(player);
+      }
+      return metrics.keys.map(product=>{
+        const info=snapshotProductInfo(snapshot,product);
+        const bucket=metrics.byProduct[product];
+        const rows=grouped[product]||[];
+        return `<div class="card"><h2>${productBadge(product)}${esc(info.community_name||product)} <span class="pill">${rows.length}</span></h2>
+          <p class="muted" style="margin-bottom:12px;">${esc(bucket.playersInGame)} in game, ${esc(bucket.playersInLobby)} in lobby, ${esc(bucket.uniqueIps)} unique IPs.</p>
+          ${rows.length?`<div class="table-wrap"><table>
+            <thead><tr><th>Player</th><th>State</th><th>IP</th><th>Room</th><th>Chat</th><th>Connected</th><th>Idle</th><th style="width:120px">Actions</th></tr></thead>
+            <tbody>${rows.map(p=>{
+              const isGameRoom=!!metrics.roomStateByKey.get(`${product}:${Number(p.room_port||0)}`);
+              return `<tr>
+                <td>${hwMarkup(p.client_name)}</td>
+                <td>${isGameRoom?'<span class="badge badge-join">game</span>':'<span class="badge badge-default">lobby</span>'}</td>
+                <td class="mono">${esc(p.client_ip)}</td>
+                <td>${esc(displayRoomName(snapshot,p.room_name,p.room_port,isGameRoom))} <span class="muted">:${esc(p.room_port)}</span></td>
+                <td>${esc(p.chat_count)}</td>
+                <td>${age(p.connected_seconds)}</td>
+                <td>${age(p.idle_seconds)}</td>
+                <td><button class="btn btn-danger btn-sm" data-action="kick" data-room-port="${esc(p.room_port)}" data-client-id="${esc(p.client_id)}">Kick</button> <button class="btn btn-danger btn-sm" data-action="ban-ip" data-ip="${esc(p.client_ip)}">Ban</button></td>
+              </tr>`;
+            }).join("")}</tbody>
+          </table></div>`:'<p class="muted">No live players connected for this product.</p>'}
+          ${rows.map(p=>{
+            const isGameRoom=!!metrics.roomStateByKey.get(`${product}:${Number(p.room_port||0)}`);
+            return `<details><summary>${hwMarkup(p.client_name)} <span class="muted">${esc(p.client_ip)} &middot; ${esc(displayRoomName(snapshot,p.room_name,p.room_port,isGameRoom))}:${esc(p.room_port)}</span></summary>
+              <div class="kv" style="padding:8px 0;">
+                <div class="k">Product</div><div class="v">${esc(product)}</div>
+                <div class="k">Client ID</div><div class="v">${esc(p.client_id)}</div>
+                <div class="k">Name</div><div class="v">${hwPlain(p.client_name)}</div>
+                <div class="k">State</div><div class="v">${isGameRoom?"In Game":"Lobby"}</div>
+                <div class="k">Subscriptions</div><div class="v">${esc(p.subscription_count)}</div>
+                <div class="k">Peer Data Msgs</div><div class="v">${esc(p.peer_data_messages)}</div>
+                <div class="k">Peer Data Bytes</div><div class="v">${esc(p.peer_data_bytes)}</div>
+                <div class="k">Last Activity</div><div class="v">${esc(p.last_activity_kind)}</div>
+              </div></details>`;
+          }).join("")}
+        </div>`;
+      }).join("");
     }
 
     function renderRooms(snapshot){
-      const rt=(snapshot.gateway||{}).routing_manager||{};const servers=rt.servers||[];
+      const rt=(snapshot.gateway||{}).routing_manager||{};const servers=rt.servers||[];const metrics=productMetrics(snapshot);
       if(!servers.length)return '<div class="card"><h2>Rooms</h2><p class="muted">No routing rooms yet.</p></div>';
-      return servers.map(room=>{
-        const isGameRoom=!!room.is_game_room||Number(room.active_game_count||0)>0;
-        const roomName=displayRoomName(snapshot,room.room_name,room.listen_port,isGameRoom);
-        const peerMsgs=Number(room.peer_data_messages||0);
-        const peerBytes=Number(room.peer_data_bytes||0);
-        const gameBytes=(room.games||[]).reduce((sum,g)=>sum+Number(g.data_len||0),0);
-        const activeGames=Number(room.active_game_count||0);
+      const grouped={};
+      for(const room of servers){
+        const product=rowProduct(snapshot,room);
+        if(!grouped[product])grouped[product]=[];
+        grouped[product].push(room);
+      }
+      return metrics.keys.map(product=>{
+        const info=snapshotProductInfo(snapshot,product);
+        const bucket=metrics.byProduct[product];
+        const rooms=grouped[product]||[];
         return `<div class="card">
-        <h2>${productBadge(room.product)}${esc(roomName)} <span class="muted" style="font-weight:400;font-size:12px;">:${esc(room.listen_port)}</span> <span class="pill">${esc(room.player_count)} players</span> <span class="pill">${esc(activeGames)} games</span></h2>
-        <div class="kv">
-          <div class="k">Product</div><div class="v">${esc(room.product||"")}</div>
-          <div class="k">Description</div><div class="v">${esc(room.room_description)}</div>
-          <div class="k">Path</div><div class="v">${esc(room.room_path)}</div>
-          <div class="k">Room Type</div><div class="v">${isGameRoom?"Game Routing":"Lobby / Published"}</div>
-          <div class="k">Published</div><div class="v">${esc(room.published)}</div>
-          <div class="k">Password Set</div><div class="v">${esc(room.room_password_set)}</div>
-          <div class="k">Flags</div><div class="v">0x${Number(room.room_flags||0).toString(16)}</div>
-          <div class="k">Peer Data Msgs</div><div class="v">${esc(peerMsgs)}</div>
-          <div class="k">Peer Data Bytes</div><div class="v">${esc(peerBytes)}</div>
-          <div class="k">Game/Object Bytes</div><div class="v">${esc(gameBytes)}</div>
-        </div>
-        ${(room.players||[]).length?`<h3>Players</h3><div class="table-wrap"><table>
-          <thead><tr><th>Name</th><th>IP</th><th>Chat</th><th>Idle</th><th style="width:60px">Action</th></tr></thead>
-          <tbody>${room.players.map(p=>`<tr><td>${hwMarkup(p.client_name)}</td><td class="mono">${esc(p.client_ip)}</td><td>${esc(p.chat_count)}</td><td>${age(p.idle_seconds)}</td><td><button class="btn btn-danger btn-sm" data-action="kick" data-room-port="${esc(room.listen_port)}" data-client-id="${esc(p.client_id)}">Kick</button></td></tr>`).join("")}</tbody>
-        </table></div>`:'<p class="muted" style="margin-top:8px;">No players in this room.</p>'}
-        ${(room.games||[]).length?`<h3>Live Game Objects</h3><div class="table-wrap"><table>
-          <thead><tr><th>Name</th><th>Owner</th><th>Link</th><th>Data</th><th>Life</th><th>Preview</th></tr></thead>
-          <tbody>${room.games.map(g=>`<tr><td>${esc(g.name)}</td><td>${hwMarkup(g.owner_name||String(g.owner_id))}</td><td>${esc(g.link_id)}</td><td>${esc(g.data_len)} bytes</td><td>${esc(g.lifespan)}</td><td class="mono">${esc(shortHex(g.data_preview_hex,32))}</td></tr>`).join("")}</tbody>
-        </table></div>`:`<p class="muted" style="margin-top:8px;">${isGameRoom?"No live game objects.":"No published games."}</p>`}
-      </div>`;
+          <h2>${productBadge(product)}${esc(info.community_name||product)} Rooms <span class="pill">${rooms.length}</span></h2>
+          <p class="muted" style="margin-bottom:12px;">${esc(bucket.activeRooms)} active rooms, ${esc(bucket.gameRooms)} active game rooms, ${esc(bucket.reconnecting)} reconnect holds.</p>
+          ${rooms.length?rooms.map(room=>{
+            const isGameRoom=!!room.is_game_room||Number(room.active_game_count||0)>0;
+            const roomName=displayRoomName(snapshot,room.room_name,room.listen_port,isGameRoom);
+            const peerMsgs=Number(room.peer_data_messages||0);
+            const peerBytes=Number(room.peer_data_bytes||0);
+            const gameBytes=(room.games||[]).reduce((sum,g)=>sum+Number(g.data_len||0),0);
+            const activeGames=Number(room.active_game_count||0);
+            return `<div class="card" style="margin-bottom:12px;">
+              <h2>${esc(roomName)} <span class="muted" style="font-weight:400;font-size:12px;">:${esc(room.listen_port)}</span> <span class="pill">${esc(room.player_count)} players</span> <span class="pill">${esc(activeGames)} games</span></h2>
+              <div class="kv">
+                <div class="k">Description</div><div class="v">${esc(room.room_description)}</div>
+                <div class="k">Path</div><div class="v">${esc(room.room_path)}</div>
+                <div class="k">Room Type</div><div class="v">${isGameRoom?"Game Routing":"Lobby / Published"}</div>
+                <div class="k">Published</div><div class="v">${esc(room.published)}</div>
+                <div class="k">Password Set</div><div class="v">${esc(room.room_password_set)}</div>
+                <div class="k">Flags</div><div class="v">0x${Number(room.room_flags||0).toString(16)}</div>
+                <div class="k">Peer Data Msgs</div><div class="v">${esc(peerMsgs)}</div>
+                <div class="k">Peer Data Bytes</div><div class="v">${esc(peerBytes)}</div>
+                <div class="k">Game/Object Bytes</div><div class="v">${esc(gameBytes)}</div>
+              </div>
+              ${(room.players||[]).length?`<h3>Players</h3><div class="table-wrap"><table>
+                <thead><tr><th>Name</th><th>IP</th><th>Chat</th><th>Idle</th><th style="width:60px">Action</th></tr></thead>
+                <tbody>${room.players.map(p=>`<tr><td>${hwMarkup(p.client_name)}</td><td class="mono">${esc(p.client_ip)}</td><td>${esc(p.chat_count)}</td><td>${age(p.idle_seconds)}</td><td><button class="btn btn-danger btn-sm" data-action="kick" data-room-port="${esc(room.listen_port)}" data-client-id="${esc(p.client_id)}">Kick</button></td></tr>`).join("")}</tbody>
+              </table></div>`:'<p class="muted" style="margin-top:8px;">No players in this room.</p>'}
+              ${(room.games||[]).length?`<h3>Live Game Objects</h3><div class="table-wrap"><table>
+                <thead><tr><th>Name</th><th>Owner</th><th>Link</th><th>Data</th><th>Life</th><th>Preview</th></tr></thead>
+                <tbody>${room.games.map(g=>`<tr><td>${esc(g.name)}</td><td>${hwMarkup(g.owner_name||String(g.owner_id))}</td><td>${esc(g.link_id)}</td><td>${esc(g.data_len)} bytes</td><td>${esc(g.lifespan)}</td><td class="mono">${esc(shortHex(g.data_preview_hex,32))}</td></tr>`).join("")}</tbody>
+              </table></div>`:`<p class="muted" style="margin-top:8px;">${isGameRoom?"No live game objects.":"No published games."}</p>`}
+            </div>`;
+          }).join(""):'<p class="muted">No routing rooms for this product.</p>'}
+        </div>`;
       }).join("");
     }
 
     function renderActivity(snapshot){
-      const gw=snapshot.gateway||{};const activity=gw.activity||[];const servers=(gw.routing_manager||{}).servers||[];
+      const gw=snapshot.gateway||{};const activity=gw.activity||[];const servers=(gw.routing_manager||{}).servers||[];const metrics=productMetrics(snapshot);
       const roomOpts=servers.map(r=>`<option value="${esc(r.listen_port)}">${esc(productText(r.product)+displayRoomName(snapshot,r.room_name,r.listen_port,!!r.is_game_room||Number(r.active_game_count||0)>0))}:${esc(r.listen_port)}</option>`).join("");
+      const grouped={};
+      for(const entry of activity){
+        const product=rowProduct(snapshot,entry);
+        if(!grouped[product])grouped[product]=[];
+        grouped[product].push(entry);
+      }
+      const summaryCards=metrics.keys.map(product=>{
+        const bucket=metrics.byProduct[product];
+        const info=bucket.info||{};
+        return `<div class="stat-card">
+          <div class="label">${esc(info.community_name||product)}</div>
+          <div class="value">${esc((grouped[product]||[]).length)}</div>
+          <div class="muted" style="margin-top:8px;">${esc(bucket.joins)} joins, ${esc(bucket.leaves)} leaves, ${esc(bucket.chats)} chats, ${esc(bucket.broadcasts)} broadcasts</div>
+        </div>`;
+      }).join("");
       return `<div class="card">
         <h2>Activity Feed <span class="pill">${activity.length}</span></h2>
         <div class="action-bar">
@@ -732,34 +986,62 @@ class AdminDashboardServer:
           <button class="btn btn-accent" data-action="broadcast">Send</button>
           <button class="btn btn-danger" data-action="clear-activity">Clear</button>
         </div>
-        ${activity.length?`<div class="table-wrap"><table>
-          <thead><tr><th style="width:80px">Time</th><th style="width:70px">Event</th><th>Player</th><th>Room</th><th>IP</th><th>Detail</th></tr></thead>
-          <tbody>${activity.map(e=>`<tr>
-            <td class="mono">${esc(stamp(e.ts))}</td>
-            <td>${kindBadge(e.kind)}</td>
-            <td>${hwMarkup(e.player_name||"")}</td>
-            <td>${esc(displayRoomName(snapshot,e.room_name,e.room_port,Number(e.room_port||0)!==Number((gw.routing_port)||0)))}${e.room_port?` <span class="muted">:${esc(e.room_port)}</span>`:""}</td>
-            <td class="mono">${esc(e.player_ip||"")}</td>
-            <td>${hwMarkup(activityDetail(snapshot,e))}</td>
-          </tr>`).join("")}</tbody>
-        </table></div>`:'<p class="muted">No activity recorded yet.</p>'}
+        ${summaryCards?`<div class="stat-grid">${summaryCards}</div>`:""}
+        ${activity.length?metrics.keys.map(product=>{
+          const info=snapshotProductInfo(snapshot,product);
+          const rows=grouped[product]||[];
+          return `<div class="card" style="margin-top:12px;">
+            <h2>${productBadge(product)}${esc(info.community_name||product)} Activity <span class="pill">${rows.length}</span></h2>
+            ${rows.length?`<div class="table-wrap"><table>
+              <thead><tr><th style="width:80px">Time</th><th style="width:70px">Event</th><th>Player</th><th>Room</th><th>IP</th><th>Detail</th></tr></thead>
+              <tbody>${rows.map(e=>{
+                const isGameRoom=!!metrics.roomStateByKey.get(`${product}:${Number(e.room_port||0)}`);
+                return `<tr>
+                  <td class="mono">${esc(stamp(e.ts))}</td>
+                  <td>${kindBadge(e.kind)}</td>
+                  <td>${hwMarkup(e.player_name||"")}</td>
+                  <td>${esc(displayRoomName(snapshot,e.room_name,e.room_port,isGameRoom))}${e.room_port?` <span class="muted">:${esc(e.room_port)}</span>`:""}</td>
+                  <td class="mono">${esc(e.player_ip||"")}</td>
+                  <td>${hwMarkup(activityDetail(snapshot,e))}</td>
+                </tr>`;
+              }).join("")}</tbody>
+            </table></div>`:'<p class="muted">No activity recorded yet for this product.</p>'}
+          </div>`;
+        }).join(""):'<p class="muted">No activity recorded yet.</p>'}
       </div>`;
     }
 
     function renderIPs(snapshot){
-      const gw=snapshot.gateway||{};const ips=gw.ip_metrics||[];
+      const gw=snapshot.gateway||{};const ips=gw.ip_metrics||[];const metrics=productMetrics(snapshot);
+      const grouped={};
+      for(const row of ips){
+        const products=sortedProductKeys(row.products||[]);
+        const targets=products.length?products:[defaultSnapshotProduct(snapshot)].filter(Boolean);
+        for(const product of targets){
+          if(!grouped[product])grouped[product]=[];
+          grouped[product].push(row);
+        }
+      }
       return `<div class="card"><h2>IP Metrics <span class="pill">${ips.length}</span></h2>
-        ${ips.length?`<div class="table-wrap"><table>
-          <thead><tr><th>IP</th><th>Players Seen</th><th>Joins</th><th>Chats</th><th>Last Seen</th><th style="width:60px">Action</th></tr></thead>
-          <tbody>${ips.map(e=>`<tr>
-            <td class="mono">${esc(e.ip)}</td>
-            <td>${nameList(e.player_names)}</td>
-            <td>${esc(e.join_count)}</td>
-            <td>${esc(e.chat_count)}</td>
-            <td>${esc(stamp(e.last_seen))}</td>
-            <td><button class="btn btn-danger btn-sm" data-action="ban-ip" data-ip="${esc(e.ip)}">Ban</button></td>
-          </tr>`).join("")}</tbody>
-        </table></div>`:'<p class="muted">No IP activity recorded yet.</p>'}
+        ${ips.length?metrics.keys.map(product=>{
+          const info=snapshotProductInfo(snapshot,product);
+          const rows=grouped[product]||[];
+          return `<div class="card" style="margin-top:12px;">
+            <h2>${productBadge(product)}${esc(info.community_name||product)} IPs <span class="pill">${rows.length}</span></h2>
+            ${rows.length?`<div class="table-wrap"><table>
+              <thead><tr><th>IP</th><th>Products</th><th>Players Seen</th><th>Joins</th><th>Chats</th><th>Last Seen</th><th style="width:60px">Action</th></tr></thead>
+              <tbody>${rows.map(e=>`<tr>
+                <td class="mono">${esc(e.ip)}</td>
+                <td>${(e.products||[]).map(productBadge).join("")||'<span class="muted">n/a</span>'}</td>
+                <td>${nameList(e.player_names)}</td>
+                <td>${esc(e.join_count)}</td>
+                <td>${esc(e.chat_count)}</td>
+                <td>${esc(stamp(e.last_seen))}</td>
+                <td><button class="btn btn-danger btn-sm" data-action="ban-ip" data-ip="${esc(e.ip)}">Ban</button></td>
+              </tr>`).join("")}</tbody>
+            </table></div>`:'<p class="muted">No IP activity recorded yet for this product.</p>'}
+          </div>`;
+        }).join(""):'<p class="muted">No IP activity recorded yet.</p>'}
       </div>`;
     }
 
@@ -802,6 +1084,7 @@ class AdminDashboardServer:
 
     function renderLogs(snapshot){
       const logs=snapshot.logs||[];
+      const productKeys=snapshotProductKeys(snapshot);
       const colored=logs.map(e=>{
         const r=esc(e.rendered||"");
         if(e.level==="ERROR")return '<span class="log-error">'+r+"</span>";
@@ -811,6 +1094,7 @@ class AdminDashboardServer:
       return `<div class="card">
         <h2>Logs <span class="pill">${logs.length}</span></h2>
         <div class="action-bar"><button class="btn btn-danger" data-action="clear-logs">Clear Logs</button></div>
+        ${productKeys.length>1?'<p class="muted" style="margin-bottom:12px;">Raw gateway logs are combined across Homeworld and Cataclysm. Use the overview, players, rooms, and activity pages for product-separated live state.</p>':""}
         <pre id="log-pre">${colored||'<span class="muted">No logs yet.</span>'}</pre>
       </div>`;
     }
@@ -992,13 +1276,18 @@ class AdminDashboardServer:
                 scope = f"room :{room_port}" if room_port is not None else "all rooms"
                 room_name = "All Rooms"
                 room_path = ""
+                room_product = ""
                 if room_port is not None and hasattr(self.gateway.routing_manager, "get_server"):
                     server = self.gateway.routing_manager.get_server(room_port)
                     if server is not None:
                         room_name = str(getattr(server, "_room_display_name", "") or room_name)
                         room_path = str(getattr(server, "_room_path", "") or "")
+                        room_product = str(
+                            getattr(getattr(server, "product_profile", None), "key", "") or ""
+                        )
                 self.gateway.record_activity(
                     "broadcast",
+                    product=room_product,
                     room_port=room_port,
                     room_name=room_name,
                     room_path=room_path,

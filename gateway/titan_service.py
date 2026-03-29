@@ -169,6 +169,7 @@ class BinaryGatewayServer:
         self,
         kind: str,
         *,
+        product: str = "",
         room_port: Optional[int] = None,
         room_name: str = "",
         room_path: str = "",
@@ -179,9 +180,11 @@ class BinaryGatewayServer:
         details: Optional[Dict[str, object]] = None,
     ) -> None:
         now = time.time()
+        product_key = str(product or self.product_profile.key).strip() or self.product_profile.key
         event = {
             "ts": now,
             "kind": kind,
+            "product": product_key,
             "room_port": room_port,
             "room_name": room_name,
             "room_path": room_path,
@@ -206,6 +209,7 @@ class BinaryGatewayServer:
                     "last_seen": 0.0,
                     "player_names": set(),
                     "rooms": set(),
+                    "products": set(),
                 },
             )
             stats["last_seen"] = now
@@ -217,6 +221,9 @@ class BinaryGatewayServer:
                 cast_rooms = stats["rooms"]
                 if isinstance(cast_rooms, set):
                     cast_rooms.add(room_name)
+            cast_products = stats["products"]
+            if isinstance(cast_products, set) and product_key:
+                cast_products.add(product_key)
             count_key = f"{kind}_count"
             if count_key in stats:
                 stats[count_key] = int(stats[count_key]) + 1
@@ -235,6 +242,7 @@ class BinaryGatewayServer:
         for ip, raw in self._ip_activity.items():
             player_names = raw.get("player_names", set())
             rooms = raw.get("rooms", set())
+            products = raw.get("products", set())
             rows.append(
                 {
                     "ip": ip,
@@ -244,6 +252,7 @@ class BinaryGatewayServer:
                     "last_seen": float(raw.get("last_seen", 0.0)),
                     "player_names": sorted(player_names) if isinstance(player_names, set) else [],
                     "rooms": sorted(rooms) if isinstance(rooms, set) else [],
+                    "products": sorted(products) if isinstance(products, set) else [],
                 }
             )
         rows.sort(key=lambda item: (-item["join_count"], -item["chat_count"], item["ip"]))
@@ -260,14 +269,75 @@ class BinaryGatewayServer:
         self._activity_counts.clear()
         self._ip_activity.clear()
 
-    def stats_snapshot(self) -> Dict[str, object]:
-        routing_snapshot = (
+    def _routing_dashboard_snapshot(self) -> Dict[str, object]:
+        raw_snapshot = (
             self.routing_manager.dashboard_snapshot()
             if self.routing_manager is not None
             else {}
         )
-        if not isinstance(routing_snapshot, dict):
-            routing_snapshot = {}
+        if not isinstance(raw_snapshot, dict):
+            return {}
+
+        product_key = self.product_profile.key
+        snapshot = dict(raw_snapshot)
+
+        players: list[Dict[str, object]] = []
+        for player in raw_snapshot.get("players", []) or []:
+            if not isinstance(player, dict):
+                continue
+            row = dict(player)
+            row["product"] = str(row.get("product") or product_key)
+            players.append(row)
+
+        servers: list[Dict[str, object]] = []
+        for server in raw_snapshot.get("servers", []) or []:
+            if not isinstance(server, dict):
+                continue
+            row = dict(server)
+            row["product"] = str(row.get("product") or product_key)
+            row["players"] = [
+                {
+                    **dict(player),
+                    "product": str(dict(player).get("product") or row["product"]),
+                }
+                for player in row.get("players", []) or []
+                if isinstance(player, dict)
+            ]
+            row["games"] = [
+                {
+                    **dict(game),
+                    "product": str(dict(game).get("product") or row["product"]),
+                }
+                for game in row.get("games", []) or []
+                if isinstance(game, dict)
+            ]
+            servers.append(row)
+
+        games: list[Dict[str, object]] = []
+        for game in raw_snapshot.get("games", []) or []:
+            if not isinstance(game, dict):
+                continue
+            row = dict(game)
+            row["product"] = str(row.get("product") or product_key)
+            games.append(row)
+
+        rooms: list[Dict[str, object]] = []
+        for room in raw_snapshot.get("rooms", []) or []:
+            if not isinstance(room, dict):
+                continue
+            row = dict(room)
+            row["product"] = str(row.get("product") or product_key)
+            rooms.append(row)
+
+        snapshot["players"] = players
+        snapshot["servers"] = servers
+        snapshot["games"] = games
+        snapshot["rooms"] = rooms
+        snapshot["products"] = [product_key]
+        return snapshot
+
+    def stats_snapshot(self) -> Dict[str, object]:
+        routing_snapshot = self._routing_dashboard_snapshot()
 
         rooms_raw = routing_snapshot.get("rooms", [])
         servers_raw = routing_snapshot.get("servers", [])
@@ -299,6 +369,7 @@ class BinaryGatewayServer:
                     continue
                 reconnecting_players.append(
                     {
+                        "product": str(reservation.get("product") or room.get("product") or self.product_profile.key),
                         "name": str(reservation.get("client_name") or ""),
                         "client_id": int(reservation.get("client_id") or 0),
                         "room_name": room_name,
@@ -319,6 +390,7 @@ class BinaryGatewayServer:
             room_peer_data_bytes[room_port] = room_peer_data_bytes.get(room_port, 0) + peer_data_bytes
             players.append(
                 {
+                    "product": str(player.get("product") or self.product_profile.key),
                     "name": str(player.get("client_name") or ""),
                     "client_id": int(player.get("client_id") or 0),
                     "room_name": str(player.get("room_name") or ""),
@@ -342,6 +414,7 @@ class BinaryGatewayServer:
             port = int(room.get("listen_port") or 0)
             rooms.append(
                 {
+                    "product": str(room.get("product") or self.product_profile.key),
                     "name": str(room.get("room_name") or ""),
                     "port": port,
                     "description": str(room.get("room_description") or ""),
@@ -369,6 +442,7 @@ class BinaryGatewayServer:
             room_game_data_bytes[room_port] = room_game_data_bytes.get(room_port, 0) + data_len
             games.append(
                 {
+                    "product": str(game.get("product") or self.product_profile.key),
                     "name": str(game.get("name") or ""),
                     "owner_name": str(game.get("owner_name") or ""),
                     "room_name": str(game.get("room_name") or ""),
@@ -402,6 +476,18 @@ class BinaryGatewayServer:
                 "routing_port": self.routing_port,
                 "version": self.version_str,
                 "valid_versions": list(self.valid_versions),
+                "products": [
+                    {
+                        "product": self.product_profile.key,
+                        "community_name": self.product_profile.community_name,
+                        "directory_root": self.product_profile.directory_root,
+                        "routing_port": self.routing_port,
+                        "version": self.version_str,
+                        "valid_versions": list(self.valid_versions),
+                        "backend_host": self.backend_host,
+                        "backend_port": self.backend_port,
+                    }
+                ],
             },
             "counts": {
                 "players_online": len(players),
@@ -420,11 +506,7 @@ class BinaryGatewayServer:
 
     def dashboard_snapshot(self, activity_limit: int = 150) -> Dict[str, object]:
         self._prune_ip_activity()
-        routing_snapshot = (
-            self.routing_manager.dashboard_snapshot()
-            if self.routing_manager is not None
-            else None
-        )
+        routing_snapshot = self._routing_dashboard_snapshot()
         return {
             "product": self.product_profile.key,
             "community_name": self.product_profile.community_name,
@@ -462,6 +544,17 @@ class BinaryGatewayServer:
                 for session_id, session in sorted(self._peer_sessions.items())
             },
             "routing_manager": routing_snapshot,
+            "products": {
+                self.product_profile.key: {
+                    "community_name": self.product_profile.community_name,
+                    "directory_root": self.product_profile.directory_root,
+                    "routing_port": self.routing_port,
+                    "backend_host": self.backend_host,
+                    "backend_port": self.backend_port,
+                    "version_str": self.version_str,
+                    "valid_versions": list(self.valid_versions),
+                }
+            },
             "banned_ips": [
                 {"ip": ip, "reason": reason}
                 for ip, reason in sorted(self._banned_ips.items())

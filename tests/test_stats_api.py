@@ -118,6 +118,18 @@ def test_gateway_stats_snapshot_returns_bot_safe_presence_summary() -> None:
         "routing_port": 15100,
         "version": "0110",
         "valid_versions": ["0110"],
+        "products": [
+            {
+                "product": "homeworld",
+                "community_name": "Homeworld",
+                "directory_root": "/Homeworld",
+                "routing_port": 15100,
+                "version": "0110",
+                "valid_versions": ["0110"],
+                "backend_host": "127.0.0.1",
+                "backend_port": 9100,
+            }
+        ],
     }
     assert snapshot["counts"] == {
         "players_online": 2,
@@ -129,6 +141,7 @@ def test_gateway_stats_snapshot_returns_bot_safe_presence_summary() -> None:
     }
     assert snapshot["players"] == [
         {
+            "product": "homeworld",
             "name": "Alpha",
             "client_id": 1,
             "room_name": "Default",
@@ -141,6 +154,7 @@ def test_gateway_stats_snapshot_returns_bot_safe_presence_summary() -> None:
             "peer_data_bytes": 54,
         },
         {
+            "product": "homeworld",
             "name": "Bravo",
             "client_id": 2,
             "room_name": "Fleet Battle",
@@ -161,6 +175,7 @@ def test_gateway_stats_snapshot_returns_bot_safe_presence_summary() -> None:
     }
     assert snapshot["rooms"] == [
         {
+            "product": "homeworld",
             "name": "Default",
             "port": 15100,
             "description": "Lobby",
@@ -178,6 +193,7 @@ def test_gateway_stats_snapshot_returns_bot_safe_presence_summary() -> None:
             "data_object_count": 0,
         },
         {
+            "product": "homeworld",
             "name": "Fleet Battle",
             "port": 15102,
             "description": "1v1",
@@ -197,6 +213,7 @@ def test_gateway_stats_snapshot_returns_bot_safe_presence_summary() -> None:
     ]
     assert snapshot["games"] == [
         {
+            "product": "homeworld",
             "name": "hw_game",
             "owner_name": "Bravo",
             "room_name": "Fleet Battle",
@@ -209,6 +226,7 @@ def test_gateway_stats_snapshot_returns_bot_safe_presence_summary() -> None:
     ]
     assert snapshot["reconnecting_players"] == [
         {
+            "product": "homeworld",
             "name": "Ghost",
             "client_id": 9,
             "room_name": "Default",
@@ -293,6 +311,7 @@ def test_gateway_stats_snapshot_infers_live_game_from_active_unpublished_room() 
     assert [player["state"] for player in snapshot["players"]] == ["game", "game"]
     assert snapshot["rooms"] == [
         {
+            "product": "homeworld",
             "name": "Homeworld Chat",
             "port": 15102,
             "description": "Homeworld Chat",
@@ -335,6 +354,49 @@ def test_gateway_stats_snapshot_reports_selected_product_identity() -> None:
     assert snapshot["server"]["directory_root"] == "/Cataclysm"
     assert snapshot["server"]["version"] == "1.0.0.1"
     assert snapshot["server"]["valid_versions"] == ["1.0.0.1", "1001"]
+    assert snapshot["server"]["products"] == [
+        {
+            "product": "cataclysm",
+            "community_name": "Cataclysm",
+            "directory_root": "/Cataclysm",
+            "routing_port": 15100,
+            "version": "1.0.0.1",
+            "valid_versions": ["1.0.0.1", "1001"],
+            "backend_host": "127.0.0.1",
+            "backend_port": 9100,
+        }
+    ]
+
+
+def test_gateway_dashboard_snapshot_tags_single_product_rows() -> None:
+    gateway = titan_binary_gateway.BinaryGatewayServer(
+        "127.0.0.1",
+        9100,
+        public_host="homeworld.kerrbell.dev",
+        public_port=15101,
+        routing_port=15100,
+        valid_versions=["0110"],
+    )
+    gateway.routing_manager = _FakeRoutingManager()
+
+    snapshot = gateway.dashboard_snapshot()
+
+    assert snapshot["products"] == {
+        "homeworld": {
+            "community_name": "Homeworld",
+            "directory_root": "/Homeworld",
+            "routing_port": 15100,
+            "backend_host": "127.0.0.1",
+            "backend_port": 9100,
+            "version_str": "0110",
+            "valid_versions": ["0110"],
+        }
+    }
+    assert snapshot["routing_manager"]["products"] == ["homeworld"]
+    assert snapshot["routing_manager"]["players"][0]["product"] == "homeworld"
+    assert snapshot["routing_manager"]["servers"][0]["product"] == "homeworld"
+    assert snapshot["routing_manager"]["games"][0]["product"] == "homeworld"
+    assert snapshot["routing_manager"]["rooms"][0]["product"] == "homeworld"
 
 
 def test_gateway_runtime_config_defaults_follow_selected_product() -> None:
