@@ -20,5 +20,5 @@ docs/*
 discord_stats_bot.py
 HWOnlineSetup.exe
 requirements-discord-bot.txt
-docs/
+!docs/server-setup.md
 examples/
