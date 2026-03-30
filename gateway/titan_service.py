@@ -33,6 +33,7 @@ class BinaryGatewayServer:
                  public_host: str = "127.0.0.1",
                  public_port: int = 15101,
                  routing_port: int = 15100,
+                 routing_max_port: Optional[int] = None,
                  version_str: str = "",
                  valid_versions: Optional[list[str]] = None,
                  keys_dir: Optional[str] = None,
@@ -51,6 +52,11 @@ class BinaryGatewayServer:
         self.public_host = public_host
         self.public_port = public_port
         self.routing_port = routing_port
+        self.routing_max_port = (
+            int(routing_max_port)
+            if routing_max_port is not None
+            else int(routing_port)
+        )
         resolved_valid_versions = list(valid_versions or [])
         if not resolved_valid_versions:
             if str(version_str or "").strip():
@@ -79,6 +85,7 @@ class BinaryGatewayServer:
         self._banned_ips: Dict[str, str] = {}
         self.routing_manager: Optional[RoutingServerManager] = None
         self._maintenance_task: Optional[asyncio.Task] = None
+        self.started_at = time.time()
         if keys_dir:
             self._load_keys(keys_dir)
 
@@ -471,9 +478,11 @@ class BinaryGatewayServer:
                 "product": self.product_profile.key,
                 "community_name": self.product_profile.community_name,
                 "directory_root": self.product_profile.directory_root,
+                "valid_versions_service": self.product_profile.valid_versions_service,
                 "public_host": self.public_host,
                 "public_port": self.public_port,
                 "routing_port": self.routing_port,
+                "routing_max_port": self.routing_max_port,
                 "version": self.version_str,
                 "valid_versions": list(self.valid_versions),
                 "products": [
@@ -481,7 +490,9 @@ class BinaryGatewayServer:
                         "product": self.product_profile.key,
                         "community_name": self.product_profile.community_name,
                         "directory_root": self.product_profile.directory_root,
+                        "valid_versions_service": self.product_profile.valid_versions_service,
                         "routing_port": self.routing_port,
+                        "routing_max_port": self.routing_max_port,
                         "version": self.version_str,
                         "valid_versions": list(self.valid_versions),
                         "backend_host": self.backend_host,
@@ -511,9 +522,11 @@ class BinaryGatewayServer:
             "product": self.product_profile.key,
             "community_name": self.product_profile.community_name,
             "directory_root": self.product_profile.directory_root,
+            "valid_versions_service": self.product_profile.valid_versions_service,
             "public_host": self.public_host,
             "public_port": self.public_port,
             "routing_port": self.routing_port,
+            "routing_max_port": self.routing_max_port,
             "backend_host": self.backend_host,
             "backend_port": self.backend_port,
             "version_str": self.version_str,
@@ -548,7 +561,9 @@ class BinaryGatewayServer:
                 self.product_profile.key: {
                     "community_name": self.product_profile.community_name,
                     "directory_root": self.product_profile.directory_root,
+                    "valid_versions_service": self.product_profile.valid_versions_service,
                     "routing_port": self.routing_port,
+                    "routing_max_port": self.routing_max_port,
                     "backend_host": self.backend_host,
                     "backend_port": self.backend_port,
                     "version_str": self.version_str,
@@ -560,6 +575,38 @@ class BinaryGatewayServer:
                 for ip, reason in sorted(self._banned_ips.items())
             ],
         }
+
+    def health_snapshot(self) -> Dict[str, object]:
+        return {
+            "ok": True,
+            "status": "ok",
+            "shared_edge": False,
+            "product": self.product_profile.key,
+            "community_name": self.product_profile.community_name,
+            "public_host": self.public_host,
+            "public_port": self.public_port,
+            "routing_port": self.routing_port,
+            "uptime_seconds": int(max(0.0, time.time() - self.started_at)),
+        }
+
+    def readiness_snapshot(self) -> Dict[str, object]:
+        checks = {
+            "auth_keys_loaded": self._auth_keys_loaded,
+            "routing_manager_attached": self.routing_manager is not None,
+        }
+        payload = self.health_snapshot()
+        payload.update(
+            {
+                "ready": all(checks.values()),
+                "status": "ready" if all(checks.values()) else "not_ready",
+                "checks": checks,
+                "backend": {
+                    "host": self.backend_host,
+                    "port": self.backend_port,
+                },
+            }
+        )
+        return payload
 
     def _load_keys(self, keys_dir: str) -> None:
         """Load verifier and auth server keypairs; build the signed key block."""
@@ -1894,6 +1941,7 @@ class SharedBinaryGatewayServer:
         self._activity_counts = shared_activity_counts
         self._ip_activity = shared_ip_activity
         self._banned_ips = shared_banned_ips
+        self.started_at = time.time()
         self.routing_manager = SharedRoutingServerManager(
             {
                 product: runtime.routing_manager
@@ -2395,9 +2443,11 @@ class SharedBinaryGatewayServer:
                     for runtime in self.runtimes.values()
                 ),
                 "directory_root": "multiple",
+                "valid_versions_service": "multiple",
                 "public_host": self.public_host,
                 "public_port": self.default_runtime.public_port,
                 "routing_port": 0,
+                "routing_max_port": 0,
                 "version": "multi",
                 "valid_versions": sorted(
                     {
@@ -2411,7 +2461,9 @@ class SharedBinaryGatewayServer:
                         "product": runtime.product_profile.key,
                         "community_name": runtime.product_profile.community_name,
                         "directory_root": runtime.product_profile.directory_root,
+                        "valid_versions_service": runtime.product_profile.valid_versions_service,
                         "routing_port": runtime.routing_port,
+                        "routing_max_port": runtime.routing_max_port,
                         "version": runtime.version_str,
                         "valid_versions": list(runtime.valid_versions),
                         "backend_host": runtime.backend_host,
@@ -2460,6 +2512,7 @@ class SharedBinaryGatewayServer:
                 for runtime in self.runtimes.values()
             ),
             "directory_root": "multiple",
+            "valid_versions_service": "multiple",
             "public_host": self.public_host,
             "public_port": self.default_runtime.public_port,
             "routing_port": 0,
@@ -2496,7 +2549,9 @@ class SharedBinaryGatewayServer:
                 product: {
                     "community_name": runtime.product_profile.community_name,
                     "directory_root": runtime.product_profile.directory_root,
+                    "valid_versions_service": runtime.product_profile.valid_versions_service,
                     "routing_port": runtime.routing_port,
+                    "routing_max_port": runtime.routing_max_port,
                     "backend_host": runtime.backend_host,
                     "backend_port": runtime.backend_port,
                     "version_str": runtime.version_str,
@@ -2509,6 +2564,52 @@ class SharedBinaryGatewayServer:
                 for ip, reason in sorted(self._banned_ips.items())
             ],
         }
+
+    def health_snapshot(self) -> Dict[str, object]:
+        return {
+            "ok": True,
+            "status": "ok",
+            "shared_edge": True,
+            "product": "shared-edge",
+            "community_name": " / ".join(
+                runtime.product_profile.community_name
+                for runtime in self.runtimes.values()
+            ),
+            "public_host": self.public_host,
+            "public_port": self.default_runtime.public_port,
+            "routing_port": 0,
+            "uptime_seconds": int(max(0.0, time.time() - self.started_at)),
+            "products": sorted(self.runtimes),
+        }
+
+    def readiness_snapshot(self) -> Dict[str, object]:
+        product_checks = {
+            product: {
+                "auth_keys_loaded": runtime._auth_keys_loaded,
+                "routing_manager_attached": runtime.routing_manager is not None,
+                "backend_host": runtime.backend_host,
+                "backend_port": runtime.backend_port,
+                "routing_port": runtime.routing_port,
+            }
+            for product, runtime in self.runtimes.items()
+        }
+        ready = bool(product_checks) and all(
+            checks["auth_keys_loaded"] and checks["routing_manager_attached"]
+            for checks in product_checks.values()
+        )
+        payload = self.health_snapshot()
+        payload.update(
+            {
+                "ready": ready,
+                "status": "ready" if ready else "not_ready",
+                "checks": {
+                    "routing_manager_attached": self.routing_manager is not None,
+                    "runtime_count": len(product_checks),
+                },
+                "products": product_checks,
+            }
+        )
+        return payload
 
 
 def _default_gateway_db_path(product_profile: ProductProfile) -> Path:
@@ -2703,6 +2804,7 @@ async def main_async(args: argparse.Namespace) -> None:
                 public_host=args.public_host,
                 public_port=args.port,
                 routing_port=int(runtime_config["routing_port"]),
+                routing_max_port=int(runtime_config["routing_max_port"]),
                 version_str=str(runtime_config["version_str"]),
                 valid_versions=list(runtime_config["valid_versions"]),
                 keys_dir=runtime_config["keys_dir"],
@@ -2760,6 +2862,7 @@ async def main_async(args: argparse.Namespace) -> None:
             public_host=args.public_host,
             public_port=args.port,
             routing_port=args.routing_port,
+            routing_max_port=args.routing_max_port,
             version_str=version_str,
             valid_versions=valid_versions,
             keys_dir=keys_dir,

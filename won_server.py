@@ -32,8 +32,11 @@ LOGGER = logging.getLogger("won_oss_server")
 SESSION_TTL_SECONDS = 24 * 60 * 60
 RATE_WINDOW_SECONDS = 5 * 60
 MAX_LOGIN_ATTEMPTS = 20
+NATIVE_KEY_WRITE_WINDOW_SECONDS = 10 * 60
+MAX_NATIVE_KEY_WRITES = 6
 MAX_EVENTS_PER_PLAYER = 256
 _login_attempts: Dict[str, List[float]] = {}
+_native_key_write_attempts: Dict[str, List[float]] = {}
 
 # Titan-oriented data object names from TitanInterface.cpp
 OBJ_DESCRIPTION = "Description"
@@ -458,6 +461,35 @@ class WONLikeState:
         _login_attempts[key] = attempts
         return True
 
+    @staticmethod
+    def _native_key_write_attempt_key(username: str, client_ip: Optional[str]) -> str:
+        if client_ip:
+            return client_ip.strip()
+        return f"user:{username.lower()}"
+
+    @staticmethod
+    def _prune_native_key_write_attempts(key: str, now: float) -> List[float]:
+        attempts = [
+            ts
+            for ts in _native_key_write_attempts.get(key, [])
+            if now - ts <= NATIVE_KEY_WRITE_WINDOW_SECONDS
+        ]
+        if attempts:
+            _native_key_write_attempts[key] = attempts
+        else:
+            _native_key_write_attempts.pop(key, None)
+        return attempts
+
+    def _allow_native_key_write(self, username: str, client_ip: Optional[str]) -> bool:
+        now = time.time()
+        key = self._native_key_write_attempt_key(username, client_ip)
+        attempts = self._prune_native_key_write_attempts(key, now)
+        if len(attempts) >= MAX_NATIVE_KEY_WRITES:
+            return False
+        attempts.append(now)
+        _native_key_write_attempts[key] = attempts
+        return True
+
     def cleanup_expired_sessions(self) -> int:
         now = time.time()
         expired_tokens = [
@@ -482,6 +514,18 @@ class WONLikeState:
                 _login_attempts[key] = pruned
             else:
                 _login_attempts.pop(key, None)
+        for key in list(_native_key_write_attempts):
+            current = _native_key_write_attempts.get(key, [])
+            pruned = [
+                ts
+                for ts in current
+                if now - ts <= NATIVE_KEY_WRITE_WINDOW_SECONDS
+            ]
+            removed_entries += max(0, len(current) - len(pruned))
+            if pruned:
+                _native_key_write_attempts[key] = pruned
+            else:
+                _native_key_write_attempts.pop(key, None)
         return removed_entries
 
     def is_session_valid(self, token: str) -> bool:
@@ -550,6 +594,8 @@ class WONLikeState:
         if row is None:
             if not create_account:
                 raise ValueError("create_account_required")
+            if not self._allow_native_key_write(username, client_ip):
+                raise ValueError("rate_limited")
             self.create_user(
                 username,
                 requested_password,
@@ -575,6 +621,8 @@ class WONLikeState:
             if normalized_cd_key and normalized_cd_key != existing_cd_key:
                 raise ValueError("cd_key_mismatch")
         elif normalized_cd_key:
+            if not self._allow_native_key_write(username, client_ip):
+                raise ValueError("rate_limited")
             cur.execute(
                 "UPDATE users SET native_cd_key=? WHERE username=?",
                 (normalized_cd_key, username),

@@ -44,6 +44,16 @@ services:
           --shared-secret "${BACKEND_SHARED_SECRET:?set BACKEND_SHARED_SECRET in .env}"
     volumes:
       - ./data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import os,socket; s=socket.create_connection(('127.0.0.1',
+          int(os.environ.get('BACKEND_PORT','9100'))), 2); s.close()"
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
     networks:
       - won-network
 
@@ -85,6 +95,17 @@ services:
           --shared-secret "${BACKEND_SHARED_SECRET:?set BACKEND_SHARED_SECRET in .env}"
     volumes:
       - ./data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          [ "${SHARED_EDGE:-0}" != "1" ] || python -c "import os,socket;
+          s=socket.create_connection(('127.0.0.1',
+          int(os.environ.get('CATACLYSM_BACKEND_PORT','9101'))), 2); s.close()"
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
     networks:
       - won-network
 
@@ -184,8 +205,10 @@ services:
           --keys-dir "$$KEYS_DIR" \
           --log "${LOG_LEVEL:-INFO}"
     depends_on:
-      - backend
-      - backend-cataclysm
+      backend:
+        condition: service_healthy
+      backend-cataclysm:
+        condition: service_healthy
     ports:
       - "${PORT_BIND_IP:-0.0.0.0}:${GATEWAY_PORT:-15101}:${GATEWAY_PORT:-15101}"
       - "${PORT_BIND_IP:-0.0.0.0}:${ROUTING_PORT:-15100}-${ROUTING_MAX_PORT:-15120}:${ROUTING_PORT:-15100}-${ROUTING_MAX_PORT:-15120}"
@@ -193,6 +216,18 @@ services:
       - "127.0.0.1:${ADMIN_PORT:-8080}:${ADMIN_PORT:-8080}"
     volumes:
       - ./data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import json,os,sys,urllib.request; port=os.environ.get('ADMIN_PORT','8080');
+          health=json.load(urllib.request.urlopen(f'http://127.0.0.1:{port}/health', timeout=2));
+          ready=json.load(urllib.request.urlopen(f'http://127.0.0.1:{port}/ready', timeout=2));
+          sys.exit(0 if health.get('ok') and ready.get('ready') else 1)"
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 15s
     networks:
       - won-network
 

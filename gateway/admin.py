@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path
+import re
 import secrets
 import sqlite3
 import time
@@ -166,6 +167,41 @@ class AdminDashboardServer:
         )
 
     @staticmethod
+    def _is_public_probe_path(path: str) -> bool:
+        return path in {"/health", "/ready", "/api/health", "/api/ready"}
+
+    def _health_snapshot(self) -> Dict[str, object]:
+        gateway_health = {"ok": True, "status": "ok"}
+        snapshot_fn = getattr(self.gateway, "health_snapshot", None)
+        if callable(snapshot_fn):
+            candidate = snapshot_fn()
+            if isinstance(candidate, dict):
+                gateway_health = dict(candidate)
+        return {
+            "ok": True,
+            "status": "ok",
+            "service": "admin",
+            "admin_uptime_seconds": int(max(0.0, time.time() - self.started_at)),
+            "gateway": gateway_health,
+        }
+
+    def _readiness_snapshot(self) -> Dict[str, object]:
+        gateway_ready = {"ready": True, "status": "ready"}
+        snapshot_fn = getattr(self.gateway, "readiness_snapshot", None)
+        if callable(snapshot_fn):
+            candidate = snapshot_fn()
+            if isinstance(candidate, dict):
+                gateway_ready = dict(candidate)
+        ready = bool(gateway_ready.get("ready", gateway_ready.get("ok", False)))
+        return {
+            "ready": ready,
+            "status": "ready" if ready else "not_ready",
+            "service": "admin",
+            "admin_uptime_seconds": int(max(0.0, time.time() - self.started_at)),
+            "gateway": gateway_ready,
+        }
+
+    @staticmethod
     def _coerce_db_value(value: object) -> object:
         if isinstance(value, bytes):
             return value.hex()
@@ -258,6 +294,88 @@ class AdminDashboardServer:
             return Path(self.db_path).resolve()
         return (Path(__file__).resolve().parent / "__admin_db_missing__.sqlite").resolve()
 
+    @staticmethod
+    def _product_runtime_info(gateway_snapshot: Dict[str, object]) -> Dict[str, Dict[str, object]]:
+        runtimes: Dict[str, Dict[str, object]] = {}
+        for product, info in dict(gateway_snapshot.get("products") or {}).items():
+            key = str(product or "").strip()
+            if not key:
+                continue
+            runtimes[key] = {
+                "community_name": str(dict(info or {}).get("community_name") or "").strip(),
+                "directory_root": str(dict(info or {}).get("directory_root") or "").strip(),
+                "valid_versions_service": str(dict(info or {}).get("valid_versions_service") or "").strip(),
+                "routing_port": int(dict(info or {}).get("routing_port") or 0),
+                "routing_max_port": int(
+                    dict(info or {}).get("routing_max_port")
+                    or dict(info or {}).get("routing_port")
+                    or 0
+                ),
+            }
+        if runtimes:
+            return runtimes
+
+        product = str(gateway_snapshot.get("product") or "").strip()
+        if product and product != "shared-edge":
+            runtimes[product] = {
+                "community_name": str(gateway_snapshot.get("community_name") or "").strip(),
+                "directory_root": str(gateway_snapshot.get("directory_root") or "").strip(),
+                "valid_versions_service": str(gateway_snapshot.get("valid_versions_service") or "").strip(),
+                "routing_port": int(gateway_snapshot.get("routing_port") or 0),
+                "routing_max_port": int(
+                    gateway_snapshot.get("routing_max_port")
+                    or gateway_snapshot.get("routing_port")
+                    or 0
+                ),
+            }
+        return runtimes
+
+    @staticmethod
+    def _classify_log_products(
+        entry: Dict[str, object],
+        gateway_snapshot: Dict[str, object],
+    ) -> list[str]:
+        message = str(entry.get("rendered") or entry.get("message") or "")
+        if not message:
+            return []
+        lowered = message.lower()
+        matches: list[str] = []
+        runtimes = AdminDashboardServer._product_runtime_info(gateway_snapshot)
+        ports = [
+            int(match.group(1))
+            for match in re.finditer(r"(?:routing-|port=)(\d{2,5})", lowered)
+        ]
+        for product, info in runtimes.items():
+            tokens = {
+                str(product).strip().lower(),
+                str(info.get("community_name") or "").strip().lower(),
+                str(info.get("directory_root") or "").strip().lower(),
+                str(info.get("valid_versions_service") or "").strip().lower(),
+                f"product={str(product).strip().lower()}",
+                f"product profile: {str(product).strip().lower()}",
+                f"-> product={str(product).strip().lower()}",
+            }
+            if any(token and token in lowered for token in tokens):
+                matches.append(product)
+                continue
+            start_port = int(info.get("routing_port") or 0)
+            end_port = int(info.get("routing_max_port") or start_port)
+            if start_port > 0 and any(start_port <= port <= end_port for port in ports):
+                matches.append(product)
+        return sorted(set(matches))
+
+    @staticmethod
+    def _annotate_logs(
+        logs: list[Dict[str, object]],
+        gateway_snapshot: Dict[str, object],
+    ) -> list[Dict[str, object]]:
+        annotated: list[Dict[str, object]] = []
+        for entry in logs:
+            row = dict(entry)
+            row["products"] = AdminDashboardServer._classify_log_products(row, gateway_snapshot)
+            annotated.append(row)
+        return annotated
+
     def snapshot(
         self,
         rows_per_table: int = 25,
@@ -265,6 +383,7 @@ class AdminDashboardServer:
         activity_limit: int = 150,
     ) -> Dict[str, object]:
         dbs = self._db_snapshots(rows_per_table=max(1, rows_per_table))
+        gateway_snapshot = self.gateway.dashboard_snapshot(activity_limit=max(1, activity_limit))
         default_db = (
             dbs.get(self.default_db_product)
             or next(iter(dbs.values()), self._db_snapshot(rows_per_table=max(1, rows_per_table)))
@@ -272,12 +391,15 @@ class AdminDashboardServer:
         return {
             "generated_at": time.time(),
             "uptime_seconds": int(time.time() - self.started_at),
-            "gateway": self.gateway.dashboard_snapshot(activity_limit=max(1, activity_limit)),
+            "gateway": gateway_snapshot,
             "repo": self.repo_monitor.snapshot(),
             "db": default_db,
             "dbs": dbs,
             "db_default_product": self.default_db_product,
-            "logs": self.log_handler.snapshot(limit=max(1, log_limit)),
+            "logs": self._annotate_logs(
+                self.log_handler.snapshot(limit=max(1, log_limit)),
+                gateway_snapshot,
+            ),
         }
 
     @staticmethod
@@ -433,6 +555,7 @@ class AdminDashboardServer:
     let lastSnapshot = null;
     let activeDbProduct = "";
     let activeDbTable = "";
+    let activeLogProduct = "all";
     let uiState = {
       pageId: "overview",
       contentScrollTop: 0,
@@ -516,15 +639,28 @@ class AdminDashboardServer:
         community_name: gw.community_name||"",
         directory_root: gw.directory_root||"",
         routing_port: gw.routing_port||0,
+        routing_max_port: gw.routing_max_port||gw.routing_port||0,
         backend_host: gw.backend_host||"",
         backend_port: gw.backend_port||0,
         version_str: gw.version_str||"",
         valid_versions: gw.valid_versions||[],
+        valid_versions_service: gw.valid_versions_service||"",
       };
     }
     function rowProduct(snapshot,row){
       const product=String((row&&row.product)||"").trim();
       return product||defaultSnapshotProduct(snapshot)||"unknown";
+    }
+    function logProducts(entry){
+      return sortedProductKeys((entry&&entry.products)||[]);
+    }
+    function logFilterState(snapshot,logs){
+      const productKeys=sortedProductKeys((logs||[]).flatMap(entry=>logProducts(entry)));
+      const hasUnclassified=(logs||[]).some(entry=>!logProducts(entry).length);
+      const validKeys=["all",...productKeys];
+      if(hasUnclassified)validKeys.push("unclassified");
+      if(!validKeys.includes(activeLogProduct))activeLogProduct="all";
+      return {productKeys,hasUnclassified};
     }
     function productMetrics(snapshot){
       const gw=snapshot.gateway||{};
@@ -999,7 +1135,7 @@ class AdminDashboardServer:
               <div class="kv">
                 <div class="k">Description</div><div class="v">${esc(room.room_description)}</div>
                 <div class="k">Path</div><div class="v">${esc(room.room_path)}</div>
-                <div class="k">Room Type</div><div class="v">${isGameRoom?"Game Routing":"Lobby / Published"}</div>
+                <div class="k">Room Type</div><div class="v">${isGameRoom?(room.published?"Game / Published":"Game Routing"):"Lobby / Published"}</div>
                 <div class="k">Published</div><div class="v">${esc(room.published)}</div>
                 <div class="k">Password Set</div><div class="v">${esc(room.room_password_set)}</div>
                 <div class="k">Flags</div><div class="v">0x${Number(room.room_flags||0).toString(16)}</div>
@@ -1165,17 +1301,33 @@ class AdminDashboardServer:
 
     function renderLogs(snapshot){
       const logs=snapshot.logs||[];
-      const productKeys=snapshotProductKeys(snapshot);
-      const colored=logs.map(e=>{
+      const {productKeys,hasUnclassified}=logFilterState(snapshot,logs);
+      const filtered=logs.filter(entry=>{
+        const products=logProducts(entry);
+        if(activeLogProduct==="all")return true;
+        if(activeLogProduct==="unclassified")return !products.length;
+        return products.includes(activeLogProduct);
+      });
+      const filterTabs=productKeys.length||hasUnclassified?`<div class="db-tabs">
+        <button class="db-tab${activeLogProduct==="all"?" active":""}" data-log-product="all">All <span class="muted">(${logs.length})</span></button>
+        ${productKeys.map(product=>{
+          const count=logs.filter(entry=>logProducts(entry).includes(product)).length;
+          return `<button class="db-tab${activeLogProduct===product?" active":""}" data-log-product="${esc(product)}">${esc(snapshotProductInfo(snapshot,product).community_name||product)} <span class="muted">(${count})</span></button>`;
+        }).join("")}
+        ${hasUnclassified?`<button class="db-tab${activeLogProduct==="unclassified"?" active":""}" data-log-product="unclassified">Unclassified <span class="muted">(${logs.filter(entry=>!logProducts(entry).length).length})</span></button>`:""}
+      </div>`:"";
+      const colored=filtered.map(e=>{
+        const tags=logProducts(e).map(productBadge).join("");
         const r=esc(e.rendered||"");
-        if(e.level==="ERROR")return '<span class="log-error">'+r+"</span>";
-        if(e.level==="WARNING")return '<span class="log-warn">'+r+"</span>";
-        return '<span class="log-info">'+r+"</span>";
+        if(e.level==="ERROR")return `${tags?`${tags} `:""}<span class="log-error">${r}</span>`;
+        if(e.level==="WARNING")return `${tags?`${tags} `:""}<span class="log-warn">${r}</span>`;
+        return `${tags?`${tags} `:""}<span class="log-info">${r}</span>`;
       }).join("\\n");
       return `<div class="card">
-        <h2>Logs <span class="pill">${logs.length}</span></h2>
+        <h2>Logs <span class="pill">${filtered.length}</span>${filtered.length!==logs.length?` <span class="pill">of ${logs.length}</span>`:""}</h2>
         <div class="action-bar"><button class="btn btn-danger" data-action="clear-logs">Clear Logs</button></div>
-        ${productKeys.length>1?'<p class="muted" style="margin-bottom:12px;">Raw gateway logs are combined across Homeworld and Cataclysm. Use the overview, players, rooms, and activity pages for product-separated live state.</p>':""}
+        ${filterTabs}
+        ${(productKeys.length>1||hasUnclassified)?'<p class="muted" style="margin-bottom:12px;">Product filters are inferred from runtime metadata, room ports, and known product markers in each log line. Unclassified entries are shared/admin/system logs.</p>':""}
         <pre id="log-pre">${colored||'<span class="muted">No logs yet.</span>'}</pre>
       </div>`;
     }
@@ -1192,6 +1344,7 @@ class AdminDashboardServer:
       content.innerHTML=fn(snapshot);
       restoreUiState();
       bindDbTabs();
+      bindLogFilters();
     }
     function bindDbTabs(){
       content.querySelectorAll("[data-db-product]").forEach(btn=>{
@@ -1207,6 +1360,17 @@ class AdminDashboardServer:
           activeDbTable=btn.dataset.dbTable||"";
           content.innerHTML=renderDatabase(lastSnapshot);
           bindDbTabs();
+        });
+      });
+    }
+    function bindLogFilters(){
+      content.querySelectorAll("[data-log-product]").forEach(btn=>{
+        btn.addEventListener("click",()=>{
+          captureUiState();
+          activeLogProduct=btn.dataset.logProduct||"all";
+          content.innerHTML=renderLogs(lastSnapshot);
+          restoreUiState();
+          bindLogFilters();
         });
       });
     }
@@ -1540,6 +1704,19 @@ class AdminDashboardServer:
 
         parsed = urlsplit(target)
         query = parse_qs(parsed.query)
+        if method == "GET" and self._is_public_probe_path(parsed.path):
+            payload = (
+                self._health_snapshot()
+                if parsed.path.endswith("health")
+                else self._readiness_snapshot()
+            )
+            body = json.dumps(payload, indent=2).encode("utf-8")
+            status = "200 OK" if payload.get("ready", payload.get("ok", False)) or parsed.path.endswith("health") else "503 Service Unavailable"
+            writer.write(self._http_response(body, "application/json; charset=utf-8", status))
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+            return
         if not self._is_authorized(parsed.path, query, headers):
             writer.write(
                 self._http_response(

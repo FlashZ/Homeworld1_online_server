@@ -10,6 +10,7 @@ using Microsoft.Win32;
 internal static class HWClientSetup
 {
     private const string CustomHostOptionLabel = "Custom host or IP";
+    private const string ConfigureBothOptionLabel = "Configure both detected games";
     private const int DefaultGatewayPort = 15101;
     private const string WonCdKeysRegistryPath = @"SOFTWARE\WON\CDKeys";
     private const string SierraCdKeyValueName = "CDKey";
@@ -346,54 +347,79 @@ internal static class HWClientSetup
     private static void Run(string[] args)
     {
         InstallerOptions options = InstallerOptions.Parse(args);
-        CurrentGame = ResolveGameConfig(options);
-        string gameDirectory = ResolveGameDirectory(options.GameDirectory, options.Uninstall);
+        List<InstallTarget> targets = ResolveInstallTargets(options);
+        if (targets.Count == 0)
+        {
+            throw new InvalidOperationException("No supported game installs were selected.");
+        }
+
+        CurrentGame = targets[0].Game;
 
         if (options.Uninstall)
         {
-            Uninstall(gameDirectory);
+            foreach (InstallTarget target in targets)
+            {
+                CurrentGame = target.Game;
+                Uninstall(target.GameDirectory);
+            }
             MessageBox.Show(
-                CurrentGame.DisplayName + " bootstrap settings removed.",
+                targets.Count == 1
+                    ? targets[0].Game.DisplayName + " bootstrap settings removed."
+                    : BuildBatchUninstallSuccessMessage(targets),
                 CurrentGame.WindowTitle,
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information);
             return;
         }
 
-        if (string.IsNullOrEmpty(gameDirectory))
+        List<InstallResult> results = new List<InstallResult>();
+        foreach (InstallTarget target in targets)
         {
-            throw new InvalidOperationException("Could not locate a supported " + CurrentGame.DisplayName + " executable.");
-        }
+            CurrentGame = target.Game;
+            string gameDirectory = target.GameDirectory;
 
-        ExistingInstallState existingState = DetectExistingInstallState(gameDirectory);
-        bool shouldRefreshInstallerOwnedKey = existingState.HasAnyRegistryCdKey && existingState.RegistryOwnedByInstaller;
-        bool defaultWriteRegistryKeys = options.WriteRegistryKeys ?? (!existingState.HasAnyRegistryCdKey || shouldRefreshInstallerOwnedKey);
-
-        // Generate a unique random key by default so users don't all share the
-        // same hardcoded key.  The known-good default is only used as a self-test
-        // for the keygen (validated inside GetDefaultRegistryCdKey).
-        GetDefaultRegistryCdKey(); // self-test only
-        RegistryCdKeyOption initialCdKey = PickRandomRegistryCdKey(existingState.SierraCdKeyDisplay);
-
-        InstallChoices installChoices = string.IsNullOrWhiteSpace(options.ServerHost)
-            ? PromptForInstallChoices(CurrentGame.DefaultServerHost, defaultWriteRegistryKeys, initialCdKey, existingState)
-            : new InstallChoices
+            if (string.IsNullOrEmpty(gameDirectory))
             {
-                ServerHost = options.ServerHost.Trim(),
-                WriteRegistryKeys = defaultWriteRegistryKeys,
-                RegistryCdKey = initialCdKey,
-            };
+                throw new InvalidOperationException("Could not locate a supported " + CurrentGame.DisplayName + " executable.");
+            }
 
-        if (string.IsNullOrWhiteSpace(installChoices.ServerHost))
-        {
-            throw new OperationCanceledException();
+            ExistingInstallState existingState = DetectExistingInstallState(gameDirectory);
+            bool shouldRefreshInstallerOwnedKey = existingState.HasAnyRegistryCdKey && existingState.RegistryOwnedByInstaller;
+            bool defaultWriteRegistryKeys = options.WriteRegistryKeys ?? (!existingState.HasAnyRegistryCdKey || shouldRefreshInstallerOwnedKey);
+
+            // Generate a unique random key by default so users don't all share the
+            // same hardcoded key.  The known-good default is only used as a self-test
+            // for the keygen (validated inside GetDefaultRegistryCdKey).
+            GetDefaultRegistryCdKey(); // self-test only
+            RegistryCdKeyOption initialCdKey = PickRandomRegistryCdKey(existingState.SierraCdKeyDisplay);
+
+            InstallChoices installChoices = string.IsNullOrWhiteSpace(options.ServerHost)
+                ? PromptForInstallChoices(CurrentGame.DefaultServerHost, defaultWriteRegistryKeys, initialCdKey, existingState, gameDirectory)
+                : new InstallChoices
+                {
+                    ServerHost = options.ServerHost.Trim(),
+                    GameDirectory = gameDirectory,
+                    WriteRegistryKeys = defaultWriteRegistryKeys,
+                    RegistryCdKey = initialCdKey,
+                };
+
+            if (string.IsNullOrWhiteSpace(installChoices.ServerHost))
+            {
+                throw new OperationCanceledException();
+            }
+
+            installChoices.ServerHost = NormalizeServerHost(installChoices.ServerHost);
+            gameDirectory = string.IsNullOrWhiteSpace(installChoices.GameDirectory)
+                ? gameDirectory
+                : installChoices.GameDirectory.Trim();
+
+            results.Add(Install(gameDirectory, installChoices.ServerHost, installChoices.WriteRegistryKeys, installChoices.RegistryCdKey));
         }
 
-        installChoices.ServerHost = NormalizeServerHost(installChoices.ServerHost);
-
-        InstallResult result = Install(gameDirectory, installChoices.ServerHost, installChoices.WriteRegistryKeys, installChoices.RegistryCdKey);
         MessageBox.Show(
-            BuildInstallSuccessMessage(result),
+            results.Count == 1
+                ? BuildInstallSuccessMessage(results[0])
+                : BuildBatchInstallSuccessMessage(results),
             CurrentGame.WindowTitle,
             MessageBoxButtons.OK,
             MessageBoxIcon.Information);
@@ -413,6 +439,8 @@ internal static class HWClientSetup
 
         return new InstallResult
         {
+            GameDisplayName = CurrentGame.DisplayName,
+            GameDirectory = Path.GetFullPath(gameDirectory),
             ServerHost = serverHost,
             RegistryWrite = registryWriteResult,
         };
@@ -803,11 +831,28 @@ internal static class HWClientSetup
         }
     }
 
-    private static GameInstallConfig ResolveGameConfig(InstallerOptions options)
+    private static List<InstallTarget> ResolveInstallTargets(InstallerOptions options)
     {
         if (!string.IsNullOrWhiteSpace(options.GameKey))
         {
-            return FindGameByKey(options.GameKey);
+            if (string.Equals(options.GameKey, "both", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!string.IsNullOrWhiteSpace(options.GameDirectory))
+                {
+                    throw new ArgumentException("`--game both` cannot be combined with `--game-dir`; let the installer resolve each game folder separately.");
+                }
+                return ResolveMultipleInstallTargets(KnownGames, options.Uninstall);
+            }
+
+            GameInstallConfig explicitGame = FindGameByKey(options.GameKey);
+            return new List<InstallTarget>
+            {
+                new InstallTarget
+                {
+                    Game = explicitGame,
+                    GameDirectory = TryResolveGameDirectory(explicitGame, options.GameDirectory, options.Uninstall, true),
+                }
+            };
         }
 
         if (!string.IsNullOrWhiteSpace(options.GameDirectory))
@@ -815,25 +860,82 @@ internal static class HWClientSetup
             GameInstallConfig fromPath = DetectGameConfigFromPath(options.GameDirectory);
             if (fromPath != null)
             {
-                return fromPath;
+                return new List<InstallTarget>
+                {
+                    new InstallTarget
+                    {
+                        Game = fromPath,
+                        GameDirectory = TryResolveGameDirectory(fromPath, options.GameDirectory, options.Uninstall, true),
+                    }
+                };
             }
         }
 
-        List<GameInstallConfig> detected = new List<GameInstallConfig>();
-        foreach (GameInstallConfig game in KnownGames)
+        List<InstallTarget> detectedTargets = CollectDetectedInstallTargets(KnownGames);
+        if (detectedTargets.Count == 1)
         {
-            if (!string.IsNullOrEmpty(TryResolveGameDirectory(game, null, false, false)))
+            return detectedTargets;
+        }
+
+        GameSelectionResult selection = PromptForGameSelection(
+            detectedTargets.Count > 0 ? detectedTargets.ConvertAll(target => target.Game).ToArray() : KnownGames,
+            allowConfigureBoth: !options.Uninstall);
+
+        if (selection.ConfigureAll)
+        {
+            return ResolveMultipleInstallTargets(
+                detectedTargets.Count > 0 ? detectedTargets.ConvertAll(target => target.Game).ToArray() : KnownGames,
+                options.Uninstall);
+        }
+
+        foreach (InstallTarget detected in detectedTargets)
+        {
+            if (string.Equals(detected.Game.Key, selection.SelectedGame.Key, StringComparison.OrdinalIgnoreCase))
             {
-                detected.Add(game);
+                return new List<InstallTarget> { detected };
             }
         }
 
-        if (detected.Count == 1)
+        return new List<InstallTarget>
         {
-            return detected[0];
-        }
+            new InstallTarget
+            {
+                Game = selection.SelectedGame,
+                GameDirectory = TryResolveGameDirectory(selection.SelectedGame, null, options.Uninstall, true),
+            }
+        };
+    }
 
-        return PromptForGameSelection(detected.Count > 0 ? detected.ToArray() : KnownGames);
+    private static List<InstallTarget> CollectDetectedInstallTargets(IList<GameInstallConfig> games)
+    {
+        List<InstallTarget> detected = new List<InstallTarget>();
+        foreach (GameInstallConfig game in games)
+        {
+            string detectedDirectory = TryResolveGameDirectory(game, null, false, false);
+            if (!string.IsNullOrEmpty(detectedDirectory))
+            {
+                detected.Add(new InstallTarget
+                {
+                    Game = game,
+                    GameDirectory = detectedDirectory,
+                });
+            }
+        }
+        return detected;
+    }
+
+    private static List<InstallTarget> ResolveMultipleInstallTargets(IList<GameInstallConfig> games, bool optional)
+    {
+        List<InstallTarget> targets = new List<InstallTarget>();
+        foreach (GameInstallConfig game in games)
+        {
+            targets.Add(new InstallTarget
+            {
+                Game = game,
+                GameDirectory = TryResolveGameDirectory(game, null, optional, true),
+            });
+        }
+        return targets;
     }
 
     private static GameInstallConfig FindGameByKey(string key)
@@ -861,7 +963,7 @@ internal static class HWClientSetup
         return null;
     }
 
-    private static GameInstallConfig PromptForGameSelection(IList<GameInstallConfig> options)
+    private static GameSelectionResult PromptForGameSelection(IList<GameInstallConfig> options, bool allowConfigureBoth)
     {
         if (options == null || options.Count == 0)
         {
@@ -870,7 +972,10 @@ internal static class HWClientSetup
 
         if (options.Count == 1)
         {
-            return options[0];
+            return new GameSelectionResult
+            {
+                SelectedGame = options[0],
+            };
         }
 
         using (Form form = new Form())
@@ -898,7 +1003,9 @@ internal static class HWClientSetup
             summaryLabel.AutoSize = false;
             summaryLabel.Location = new Point(15, 38);
             summaryLabel.Size = new Size(370, 34);
-            summaryLabel.Text = "Multiple supported games were detected. Choose which one to configure.";
+            summaryLabel.Text = allowConfigureBoth
+                ? "Choose one game to configure, or pick Configure both to walk through each detected install in sequence."
+                : "Choose which game to configure.";
 
             gameCombo.DropDownStyle = ComboBoxStyle.DropDownList;
             gameCombo.Location = new Point(15, 80);
@@ -907,6 +1014,10 @@ internal static class HWClientSetup
             foreach (GameInstallConfig game in options)
             {
                 gameCombo.Items.Add(game.DisplayName);
+            }
+            if (allowConfigureBoth)
+            {
+                gameCombo.Items.Add(ConfigureBothOptionLabel);
             }
             gameCombo.SelectedIndex = 0;
 
@@ -934,13 +1045,19 @@ internal static class HWClientSetup
                 throw new OperationCanceledException();
             }
 
-            return options[gameCombo.SelectedIndex];
-        }
-    }
+            if (allowConfigureBoth && gameCombo.SelectedIndex == options.Count)
+            {
+                return new GameSelectionResult
+                {
+                    ConfigureAll = true,
+                };
+            }
 
-    private static string ResolveGameDirectory(string explicitDirectory, bool optional)
-    {
-        return TryResolveGameDirectory(CurrentGame, explicitDirectory, optional, true);
+            return new GameSelectionResult
+            {
+                SelectedGame = options[gameCombo.SelectedIndex],
+            };
+        }
     }
 
     private static string TryResolveGameDirectory(GameInstallConfig game, string explicitDirectory, bool optional, bool promptIfMissing)
@@ -1352,7 +1469,9 @@ internal static class HWClientSetup
     private static string BuildInstallSuccessMessage(InstallResult result)
     {
         StringBuilder builder = new StringBuilder();
-        builder.AppendFormat("{0} is ready.", CurrentGame.DisplayName);
+        builder.AppendFormat("{0} is ready.", result.GameDisplayName);
+        builder.AppendLine();
+        builder.AppendFormat("Install folder: {0}", result.GameDirectory);
         builder.AppendLine();
         builder.AppendFormat("Server: {0}", result.ServerHost);
         builder.AppendLine();
@@ -1368,10 +1487,52 @@ internal static class HWClientSetup
         return builder.ToString();
     }
 
-    private static InstallChoices PromptForInstallChoices(string defaultValue, bool defaultWriteRegistryKeys, RegistryCdKeyOption defaultCdKey, ExistingInstallState existingState)
+    private static string BuildBatchInstallSuccessMessage(IList<InstallResult> results)
+    {
+        StringBuilder builder = new StringBuilder();
+        builder.AppendLine("Selected games are ready.");
+        builder.AppendLine();
+        foreach (InstallResult result in results)
+        {
+            builder.AppendFormat("- {0}", result.GameDisplayName);
+            builder.AppendLine();
+            builder.AppendFormat("  Folder: {0}", result.GameDirectory);
+            builder.AppendLine();
+            builder.AppendFormat("  Server: {0}", result.ServerHost);
+            builder.AppendLine();
+            if (result.RegistryWrite != null)
+            {
+                builder.AppendFormat("  CD key: {0}", result.RegistryWrite.DisplayCdKey);
+                builder.AppendLine();
+            }
+            builder.AppendLine();
+        }
+        builder.Append("Launch the games normally to play online.");
+        return builder.ToString();
+    }
+
+    private static string BuildBatchUninstallSuccessMessage(IList<InstallTarget> targets)
+    {
+        StringBuilder builder = new StringBuilder();
+        builder.AppendLine("Retail WON bootstrap settings removed for:");
+        builder.AppendLine();
+        foreach (InstallTarget target in targets)
+        {
+            builder.AppendFormat("- {0}: {1}", target.Game.DisplayName, target.GameDirectory);
+            builder.AppendLine();
+        }
+        return builder.ToString().TrimEnd();
+    }
+
+    private static InstallChoices PromptForInstallChoices(string defaultValue, bool defaultWriteRegistryKeys, RegistryCdKeyOption defaultCdKey, ExistingInstallState existingState, string initialGameDirectory)
     {
         using (Form form = new Form())
         using (Label summaryLabel = new Label())
+        using (GroupBox installGroup = new GroupBox())
+        using (Label installPathLabel = new Label())
+        using (TextBox installPathTextBox = new TextBox())
+        using (Button changePathButton = new Button())
+        using (Label installHelpLabel = new Label())
         using (GroupBox serverGroup = new GroupBox())
         using (Label presetLabel = new Label())
         using (ComboBox presetCombo = new ComboBox())
@@ -1389,12 +1550,16 @@ internal static class HWClientSetup
             string initialValue = string.IsNullOrWhiteSpace(defaultValue)
                 ? CurrentGame.DefaultServerHost
                 : defaultValue.Trim();
+            string selectedGameDirectory = string.IsNullOrWhiteSpace(initialGameDirectory)
+                ? string.Empty
+                : Path.GetFullPath(initialGameDirectory);
             RegistryCdKeyOption selectedCdKey = defaultCdKey ?? GetDefaultRegistryCdKey();
+            ExistingInstallState selectedInstallState = existingState;
 
             form.Text = CurrentGame.WindowTitle;
             form.FormBorderStyle = FormBorderStyle.FixedDialog;
             form.StartPosition = FormStartPosition.CenterScreen;
-            form.ClientSize = new Size(480, 390);
+            form.ClientSize = new Size(480, 470);
             form.MinimizeBox = false;
             form.MaximizeBox = false;
             form.Font = SystemFonts.MessageBoxFont;
@@ -1406,9 +1571,38 @@ internal static class HWClientSetup
             summaryLabel.Size = new Size(450, 52);
             summaryLabel.Text = BuildInstallSummaryText(existingState);
 
+            // --- Install path group ---
+            installGroup.Text = "Install Folder";
+            installGroup.Location = new Point(12, 68);
+            installGroup.Size = new Size(452, 84);
+
+            installPathLabel.AutoSize = true;
+            installPathLabel.Location = new Point(10, 22);
+            installPathLabel.Text = "Detected path:";
+
+            installPathTextBox.Location = new Point(12, 40);
+            installPathTextBox.ReadOnly = true;
+            installPathTextBox.Size = new Size(328, 23);
+            installPathTextBox.TabIndex = 0;
+
+            changePathButton.Location = new Point(346, 39);
+            changePathButton.Size = new Size(92, 25);
+            changePathButton.Text = "Change...";
+            changePathButton.TabIndex = 1;
+
+            installHelpLabel.Location = new Point(12, 64);
+            installHelpLabel.Size = new Size(426, 16);
+            installHelpLabel.ForeColor = SystemColors.GrayText;
+            installHelpLabel.Text = "Use Change... if this is not the copy of " + CurrentGame.DisplayName + " you want to patch.";
+
+            installGroup.Controls.Add(installPathLabel);
+            installGroup.Controls.Add(installPathTextBox);
+            installGroup.Controls.Add(changePathButton);
+            installGroup.Controls.Add(installHelpLabel);
+
             // --- Server group ---
             serverGroup.Text = "Server";
-            serverGroup.Location = new Point(12, 68);
+            serverGroup.Location = new Point(12, 160);
             serverGroup.Size = new Size(452, 108);
 
             presetLabel.AutoSize = true;
@@ -1437,7 +1631,7 @@ internal static class HWClientSetup
 
             // --- Registry / CD key group ---
             registryGroup.Text = "CD Key";
-            registryGroup.Location = new Point(12, 184);
+            registryGroup.Location = new Point(12, 276);
             registryGroup.Size = new Size(452, 148);
 
             registryCheckBox.AutoSize = true;
@@ -1474,14 +1668,14 @@ internal static class HWClientSetup
             // --- Buttons ---
             installButton.Text = "Install";
             installButton.Size = new Size(84, 30);
-            installButton.Location = new Point(290, 346);
-            installButton.TabIndex = 5;
+            installButton.Location = new Point(290, 430);
+            installButton.TabIndex = 6;
 
             cancelButton.Text = "Cancel";
             cancelButton.Size = new Size(84, 30);
-            cancelButton.Location = new Point(380, 346);
+            cancelButton.Location = new Point(380, 430);
             cancelButton.DialogResult = DialogResult.Cancel;
-            cancelButton.TabIndex = 6;
+            cancelButton.TabIndex = 7;
 
             // --- Sync state ---
             EventHandler syncSelection = delegate
@@ -1491,6 +1685,8 @@ internal static class HWClientSetup
                     CustomHostOptionLabel,
                     StringComparison.OrdinalIgnoreCase);
                 bool installRegistryKey = registryCheckBox.Checked;
+                summaryLabel.Text = BuildInstallSummaryText(selectedInstallState);
+                installPathTextBox.Text = selectedGameDirectory;
                 customTextBox.Enabled = useCustom;
                 customLabel.Enabled = useCustom;
                 selectedKeyLabel.Enabled = installRegistryKey;
@@ -1498,7 +1694,7 @@ internal static class HWClientSetup
                 generateKeyButton.Enabled = installRegistryKey;
                 registryHelpLabel.Enabled = installRegistryKey;
                 cdKeyTextBox.Text = selectedCdKey.DisplayCdKey;
-                registryHelpLabel.Text = BuildRegistryHelpText(installRegistryKey, selectedCdKey, existingState);
+                registryHelpLabel.Text = BuildRegistryHelpText(installRegistryKey, selectedCdKey, selectedInstallState);
             };
 
             if (string.Equals(initialValue, CurrentGame.DefaultServerHost, StringComparison.OrdinalIgnoreCase))
@@ -1515,6 +1711,31 @@ internal static class HWClientSetup
 
             presetCombo.SelectedIndexChanged += syncSelection;
             registryCheckBox.CheckedChanged += syncSelection;
+            changePathButton.Click += delegate
+            {
+                try
+                {
+                    string pickedPath = PickGameDirectory(
+                        CurrentGame,
+                        "Select the " + CurrentGame.DisplayName + " install folder.",
+                        false);
+                    if (!string.IsNullOrWhiteSpace(pickedPath))
+                    {
+                        selectedGameDirectory = Path.GetFullPath(pickedPath);
+                        selectedInstallState = DetectExistingInstallState(selectedGameDirectory);
+                        syncSelection(null, EventArgs.Empty);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(
+                        form,
+                        ex.Message,
+                        CurrentGame.WindowTitle,
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
+            };
             generateKeyButton.Click += delegate
             {
                 selectedCdKey = PickRandomRegistryCdKey(selectedCdKey.DisplayCdKey);
@@ -1563,11 +1784,11 @@ internal static class HWClientSetup
                     return;
                 }
 
-                if (registryCheckBox.Checked && existingState.HasAnyRegistryCdKey && !existingState.RegistryOwnedByInstaller)
+                if (registryCheckBox.Checked && selectedInstallState.HasAnyRegistryCdKey && !selectedInstallState.RegistryOwnedByInstaller)
                 {
                     DialogResult overwriteResult = MessageBox.Show(
                         form,
-                        BuildExistingRegistryPrompt(existingState, selectedCdKey),
+                        BuildExistingRegistryPrompt(selectedInstallState, selectedCdKey),
                         CurrentGame.WindowTitle,
                         MessageBoxButtons.YesNo,
                         MessageBoxIcon.Warning);
@@ -1583,6 +1804,7 @@ internal static class HWClientSetup
             };
 
             form.Controls.Add(summaryLabel);
+            form.Controls.Add(installGroup);
             form.Controls.Add(serverGroup);
             form.Controls.Add(registryGroup);
             form.Controls.Add(installButton);
@@ -1603,6 +1825,7 @@ internal static class HWClientSetup
 
             return new InstallChoices
             {
+                GameDirectory = selectedGameDirectory,
                 ServerHost = serverHost,
                 WriteRegistryKeys = registryCheckBox.Checked,
                 RegistryCdKey = selectedCdKey,
@@ -1695,6 +1918,7 @@ internal static class HWClientSetup
 
     private sealed class InstallChoices
     {
+        public string GameDirectory { get; set; }
         public string ServerHost { get; set; }
         public bool WriteRegistryKeys { get; set; }
         public RegistryCdKeyOption RegistryCdKey { get; set; }
@@ -1745,6 +1969,18 @@ internal static class HWClientSetup
         }
     }
 
+    private sealed class GameSelectionResult
+    {
+        public bool ConfigureAll { get; set; }
+        public GameInstallConfig SelectedGame { get; set; }
+    }
+
+    private sealed class InstallTarget
+    {
+        public GameInstallConfig Game { get; set; }
+        public string GameDirectory { get; set; }
+    }
+
     private sealed class RegistryWriteResult
     {
         public string DisplayCdKey { get; set; }
@@ -1757,6 +1993,8 @@ internal static class HWClientSetup
 
     private sealed class InstallResult
     {
+        public string GameDisplayName { get; set; }
+        public string GameDirectory { get; set; }
         public string ServerHost { get; set; }
         public RegistryWriteResult RegistryWrite { get; set; }
     }

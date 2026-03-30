@@ -38,7 +38,7 @@ Ports to expose:
 | `15100-15120/tcp` | Routing, chat, and game rooms |
 | `2021/tcp` | Firewall/NAT probe |
 
-The admin dashboard is available at `http://127.0.0.1:8080/?token=...` on the host machine. In Docker, the dashboard is published through the gateway container, so `ADMIN_TOKEN` is required.
+The admin dashboard is available at `http://127.0.0.1:8080/?token=...` on the host machine. In Docker, the dashboard is published through the gateway container, so `ADMIN_TOKEN` is required. The same admin port now also exposes unauthenticated JSON probes at `/health` and `/ready` for container checks and reverse-proxy monitoring.
 
 ## Testing
 
@@ -56,7 +56,7 @@ GitHub Actions runs the same suite on every push and pull request across Python 
 
 Distribute `RetailWONSetup.exe` to players. Run as Administrator.
 
-The installer now auto-detects retail Homeworld and Cataclysm installs, prompts for the game when both are present, optionally writes a matching randomized retail CD key to the registry for the selected game, updates `NetTweak.script` to point at your server, and installs the shared `kver.kp` verifier key. No Python is required on client machines.
+The installer now auto-detects retail Homeworld and Cataclysm installs, prompts for the game when both are present, can walk through both games in one run, shows the detected install folder before it writes anything, lets you change that folder if needed, optionally writes a matching randomized retail CD key to the registry for the selected game, updates `NetTweak.script` to point at your server, and installs the shared `kver.kp` verifier key. No Python is required on client machines.
 
 The bundled installer pool is still static at runtime, but you can now regenerate a much larger pool from the real retail algorithm with `generate_cdkeys.py` instead of hand-curating captured keys.
 
@@ -67,6 +67,20 @@ installer\build_installer.bat
 ```
 
 The default output artifact is `installer\RetailWONSetup.exe`. You can still override the filename with `INSTALLER_OUTPUT_NAME=...` when needed.
+
+GitHub releases now include:
+
+- `RetailWONSetup-....exe`
+- `RetailWONSetup-....exe.sha256`
+- `RetailWONSetup-....exe.VERIFY.txt`
+
+If SmartScreen appears, compare the release hash first:
+
+```powershell
+Get-FileHash .\RetailWONSetup-....exe -Algorithm SHA256
+```
+
+The SHA-256 printed by PowerShell must match the value in the release `.sha256` file and the bundled `VERIFY.txt`.
 
 ### How client bootstrap works
 
@@ -197,6 +211,31 @@ On startup you should see log lines like:
 - `Shared-edge runtime: homeworld ...`
 - `Shared-edge runtime: cataclysm ...`
 - `Titan binary gateway listening on (...) -> shared edge`
+
+### Running two separate stacks instead of shared edge
+
+If you do **not** want one shared public edge yet, run two ordinary single-product stacks on separate host IPs or separate machines.
+
+Typical layout on one box with two public IPs:
+
+1. Create `homeworld.env` with:
+   - `PRODUCT=homeworld`
+   - `SHARED_EDGE=0`
+   - `PORT_BIND_IP=<homeworld-public-ip>`
+   - `PUBLIC_HOST=homeworld.example.com`
+2. Create `cataclysm.env` with:
+   - `PRODUCT=cataclysm`
+   - `SHARED_EDGE=0`
+   - `PORT_BIND_IP=<cataclysm-public-ip>`
+   - `PUBLIC_HOST=cataclysm.example.com`
+3. Launch each as its own compose project:
+
+```bash
+docker compose --env-file homeworld.env -p won-homeworld up -d --build
+docker compose --env-file cataclysm.env -p won-cataclysm up -d --build
+```
+
+Use this mode when you want the cleanest operational separation. Use shared-edge mode when both games must share one public retail port set.
 
 ## Architecture
 

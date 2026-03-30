@@ -113,9 +113,11 @@ def test_gateway_stats_snapshot_returns_bot_safe_presence_summary() -> None:
         "product": "homeworld",
         "community_name": "Homeworld",
         "directory_root": "/Homeworld",
+        "valid_versions_service": "HomeworldValidVersions",
         "public_host": "homeworld.kerrbell.dev",
         "public_port": 15101,
         "routing_port": 15100,
+        "routing_max_port": 15100,
         "version": "0110",
         "valid_versions": ["0110"],
         "products": [
@@ -123,7 +125,9 @@ def test_gateway_stats_snapshot_returns_bot_safe_presence_summary() -> None:
                 "product": "homeworld",
                 "community_name": "Homeworld",
                 "directory_root": "/Homeworld",
+                "valid_versions_service": "HomeworldValidVersions",
                 "routing_port": 15100,
+                "routing_max_port": 15100,
                 "version": "0110",
                 "valid_versions": ["0110"],
                 "backend_host": "127.0.0.1",
@@ -359,7 +363,9 @@ def test_gateway_stats_snapshot_reports_selected_product_identity() -> None:
             "product": "cataclysm",
             "community_name": "Cataclysm",
             "directory_root": "/Cataclysm",
+            "valid_versions_service": "CataclysmValidVersions",
             "routing_port": 15100,
+            "routing_max_port": 15100,
             "version": "1.0.0.1",
             "valid_versions": ["1.0.0.1", "1001"],
             "backend_host": "127.0.0.1",
@@ -385,7 +391,9 @@ def test_gateway_dashboard_snapshot_tags_single_product_rows() -> None:
         "homeworld": {
             "community_name": "Homeworld",
             "directory_root": "/Homeworld",
+            "valid_versions_service": "HomeworldValidVersions",
             "routing_port": 15100,
+            "routing_max_port": 15100,
             "backend_host": "127.0.0.1",
             "backend_port": 9100,
             "version_str": "0110",
@@ -397,6 +405,40 @@ def test_gateway_dashboard_snapshot_tags_single_product_rows() -> None:
     assert snapshot["routing_manager"]["servers"][0]["product"] == "homeworld"
     assert snapshot["routing_manager"]["games"][0]["product"] == "homeworld"
     assert snapshot["routing_manager"]["rooms"][0]["product"] == "homeworld"
+
+
+def test_gateway_probe_snapshots_report_readiness_state() -> None:
+    gateway = titan_binary_gateway.BinaryGatewayServer(
+        "127.0.0.1",
+        9100,
+        public_host="homeworld.kerrbell.dev",
+        public_port=15101,
+        routing_port=15100,
+        valid_versions=["0110"],
+    )
+
+    health = gateway.health_snapshot()
+    not_ready = gateway.readiness_snapshot()
+
+    assert health["ok"] is True
+    assert health["status"] == "ok"
+    assert health["product"] == "homeworld"
+    assert not_ready["ready"] is False
+    assert not_ready["checks"] == {
+        "auth_keys_loaded": False,
+        "routing_manager_attached": False,
+    }
+
+    gateway._auth_keys_loaded = True
+    gateway.routing_manager = object()  # type: ignore[assignment]
+
+    ready = gateway.readiness_snapshot()
+
+    assert ready["ready"] is True
+    assert ready["checks"] == {
+        "auth_keys_loaded": True,
+        "routing_manager_attached": True,
+    }
 
 
 def test_gateway_runtime_config_defaults_follow_selected_product() -> None:

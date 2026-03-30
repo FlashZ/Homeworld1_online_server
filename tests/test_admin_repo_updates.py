@@ -16,9 +16,14 @@ class _FakeGateway:
 
     def dashboard_snapshot(self, activity_limit: int = 150) -> dict[str, object]:
         return {
+            "product": "homeworld",
+            "community_name": "Homeworld",
+            "directory_root": "/Homeworld",
+            "valid_versions_service": "HomeworldValidVersions",
             "public_host": "homeworld.kerrbell.dev",
             "public_port": 15101,
             "routing_port": 15100,
+            "routing_max_port": 15120,
             "backend_host": "backend",
             "backend_port": 9100,
             "version_str": "0110",
@@ -36,6 +41,19 @@ class _FakeGateway:
                 "current_unique_ip_count": 0,
                 "servers": [],
             },
+            "products": {
+                "homeworld": {
+                    "community_name": "Homeworld",
+                    "directory_root": "/Homeworld",
+                    "valid_versions_service": "HomeworldValidVersions",
+                    "routing_port": 15100,
+                    "routing_max_port": 15120,
+                    "backend_host": "backend",
+                    "backend_port": 9100,
+                    "version_str": "0110",
+                    "valid_versions": ["0110"],
+                }
+            },
             "banned_ips": [],
         }
 
@@ -43,6 +61,24 @@ class _FakeGateway:
         entry = {"kind": kind}
         entry.update(kwargs)
         self.activities.append(entry)
+
+    def health_snapshot(self) -> dict[str, object]:
+        return {
+            "ok": True,
+            "status": "ok",
+            "shared_edge": False,
+            "product": "homeworld",
+        }
+
+    def readiness_snapshot(self) -> dict[str, object]:
+        return {
+            "ready": True,
+            "status": "ready",
+            "checks": {
+                "auth_keys_loaded": True,
+                "routing_manager_attached": True,
+            },
+        }
 
 
 class _FakeServer:
@@ -65,6 +101,46 @@ class _FakeRoutingManager:
         if port == 15100:
             return self._server
         return None
+
+
+class _SharedEdgeFakeGateway(_FakeGateway):
+    def dashboard_snapshot(self, activity_limit: int = 150) -> dict[str, object]:
+        snapshot = super().dashboard_snapshot(activity_limit)
+        snapshot.update(
+            {
+                "product": "shared-edge",
+                "community_name": "Homeworld / Cataclysm",
+                "directory_root": "multiple",
+                "valid_versions_service": "multiple",
+                "routing_port": 0,
+                "routing_max_port": 0,
+                "products": {
+                    "homeworld": {
+                        "community_name": "Homeworld",
+                        "directory_root": "/Homeworld",
+                        "valid_versions_service": "HomeworldValidVersions",
+                        "routing_port": 15100,
+                        "routing_max_port": 15109,
+                        "backend_host": "backend",
+                        "backend_port": 9100,
+                        "version_str": "0110",
+                        "valid_versions": ["0110"],
+                    },
+                    "cataclysm": {
+                        "community_name": "Cataclysm",
+                        "directory_root": "/Cataclysm",
+                        "valid_versions_service": "CataclysmValidVersions",
+                        "routing_port": 15110,
+                        "routing_max_port": 15120,
+                        "backend_host": "backend-cataclysm",
+                        "backend_port": 9101,
+                        "version_str": "1001",
+                        "valid_versions": ["1.0.0.1", "1001"],
+                    },
+                },
+            }
+        )
+        return snapshot
 
 
 class _FakeRepoMonitor:
@@ -208,6 +284,32 @@ def test_admin_snapshot_includes_product_scoped_databases(tmp_path: Path) -> Non
     assert snapshot["db"]["path"] == str(hw_db.resolve())
     assert snapshot["dbs"]["homeworld"]["tables"]["users"]["count"] == 1
     assert snapshot["dbs"]["cataclysm"]["tables"]["users"]["rows"][0]["username"] == "zero"
+
+
+def test_admin_health_and_ready_snapshots_are_machine_readable() -> None:
+    dashboard = titan_binary_gateway.AdminDashboardServer(
+        gateway=_FakeGateway(),
+        db_path="won_server.db",
+        log_handler=titan_binary_gateway.DashboardLogHandler(),
+        repo_monitor=_FakeRepoMonitor(),
+    )
+
+    health = dashboard._health_snapshot()
+    ready = dashboard._readiness_snapshot()
+
+    assert health["ok"] is True
+    assert health["service"] == "admin"
+    assert health["gateway"]["product"] == "homeworld"
+    assert ready["ready"] is True
+    assert ready["gateway"]["checks"]["auth_keys_loaded"] is True
+
+
+def test_admin_probe_paths_are_public() -> None:
+    assert titan_binary_gateway.AdminDashboardServer._is_public_probe_path("/health")
+    assert titan_binary_gateway.AdminDashboardServer._is_public_probe_path("/ready")
+    assert titan_binary_gateway.AdminDashboardServer._is_public_probe_path("/api/health")
+    assert titan_binary_gateway.AdminDashboardServer._is_public_probe_path("/api/ready")
+    assert not titan_binary_gateway.AdminDashboardServer._is_public_probe_path("/api/stats")
 
 
 def test_admin_repo_check_endpoint_uses_repo_monitor() -> None:
@@ -409,6 +511,56 @@ def test_admin_clear_cd_key_targets_selected_product_db(tmp_path: Path) -> None:
 
     assert hw_keys == ("HW-KEEP", "hw-login")
     assert cata_keys == ("", "")
+
+
+def test_admin_snapshot_annotates_logs_with_inferred_products() -> None:
+    handler = titan_binary_gateway.DashboardLogHandler()
+    handler.records.extend(
+        [
+            {
+                "created": 1.0,
+                "level": "INFO",
+                "logger": "gateway.protocol",
+                "message": "DirGet(shared): path='/TitanServers' svc_filter='CataclysmValidVersions' -> product=cataclysm",
+                "rendered": "DirGet(shared): path='/TitanServers' svc_filter='CataclysmValidVersions' -> product=cataclysm",
+            },
+            {
+                "created": 2.0,
+                "level": "INFO",
+                "logger": "gateway.protocol",
+                "message": "Routing-15102 connection from 1.2.3.4:50000",
+                "rendered": "Routing-15102 connection from 1.2.3.4:50000",
+            },
+            {
+                "created": 3.0,
+                "level": "INFO",
+                "logger": "gateway.protocol",
+                "message": "Routing-15110 connection from 1.2.3.4:50001",
+                "rendered": "Routing-15110 connection from 1.2.3.4:50001",
+            },
+            {
+                "created": 4.0,
+                "level": "INFO",
+                "logger": "gateway.admin",
+                "message": "Admin dashboard listening on ('127.0.0.1', 8080)",
+                "rendered": "Admin dashboard listening on ('127.0.0.1', 8080)",
+            },
+        ]
+    )
+    dashboard = titan_binary_gateway.AdminDashboardServer(
+        gateway=_SharedEdgeFakeGateway(),
+        db_path="won_server.db",
+        log_handler=handler,
+        repo_monitor=_FakeRepoMonitor(),
+    )
+
+    snapshot = dashboard.snapshot(rows_per_table=1, log_limit=10, activity_limit=1)
+    logs = snapshot["logs"]
+
+    assert logs[0]["products"] == ["cataclysm"]
+    assert logs[1]["products"] == ["homeworld"]
+    assert logs[2]["products"] == ["cataclysm"]
+    assert logs[3]["products"] == []
 
 
 def test_admin_html_contains_clear_cd_key_action() -> None:
