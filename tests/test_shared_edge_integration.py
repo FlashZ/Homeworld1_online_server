@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 import struct
 
+from cryptography.hazmat.primitives.asymmetric import dsa
 from gateway.protocol import _parse_auth1_certificate
 from product_profile import CATACLYSM_PRODUCT_PROFILE, HOMEWORLD_PRODUCT_PROFILE
 import titan_binary_gateway
@@ -17,6 +18,31 @@ def _pack_pw_string(value: str) -> bytes:
 def _pack_raw_buf(data: bytes) -> bytes:
     payload = bytes(data or b"")
     return struct.pack("<H", len(payload)) + payload
+
+
+def _write_test_keys(keys_dir: Path) -> Path:
+    keys_dir.mkdir(parents=True, exist_ok=True)
+    params = dsa.generate_parameters(key_size=1024)
+    pn = params.parameter_numbers()
+    p, q, g = pn.p, pn.q, pn.g
+
+    verifier = params.generate_private_key().private_numbers()
+    auth = params.generate_private_key().private_numbers()
+
+    ver_y = verifier.public_numbers.y
+    auth_y = auth.public_numbers.y
+
+    ver_pub_der = won_crypto.encode_public_key(p, q, g, ver_y)
+    ver_priv_der = won_crypto.encode_private_key(p, q, g, ver_y, verifier.x)
+    auth_pub_der = won_crypto.encode_public_key(p, q, g, auth_y)
+    auth_priv_der = won_crypto.encode_private_key(p, q, g, auth_y, auth.x)
+
+    (keys_dir / "verifier_public.der").write_bytes(ver_pub_der)
+    (keys_dir / "verifier_private.der").write_bytes(ver_priv_der)
+    (keys_dir / "authserver_public.der").write_bytes(auth_pub_der)
+    (keys_dir / "authserver_private.der").write_bytes(auth_priv_der)
+    (keys_dir / "kver.kp").write_bytes(ver_pub_der)
+    return keys_dir
 
 
 def _build_auth1_login_request(
@@ -128,7 +154,7 @@ def test_shared_edge_native_auth_routes_homeworld_and_cataclysm_over_one_gateway
     tmp_path: Path,
 ) -> None:
     async def _run() -> None:
-        keys_dir = Path(__file__).resolve().parents[1] / "keys"
+        keys_dir = _write_test_keys(tmp_path / "keys")
         home_backend, _home_state, home_store = await won_server.run_server(
             host="127.0.0.1",
             port=0,

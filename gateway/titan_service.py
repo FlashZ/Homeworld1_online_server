@@ -1355,6 +1355,12 @@ class BinaryGatewayServer:
                     elif session.role == PEER_ROLE_FACTORY:
                         await self._handle_factory_session(reader, writer, session, first_body=body)
                     return
+                LOGGER.info(
+                    "Peer(session): unknown or expired session_id=%d from %s:%s",
+                    session_id,
+                    *peer,
+                )
+                return
 
             # Non-Auth1: one-shot dispatch (DirGet, etc.)
             version = body[0] if body else 0
@@ -2254,6 +2260,12 @@ class SharedBinaryGatewayServer:
                                 first_body=body,
                             )
                         return
+                LOGGER.info(
+                    "Peer(session/shared): unknown or expired session_id=%d from %s:%s",
+                    session_id,
+                    *peer,
+                )
+                return
 
             if len(body) >= 2 and body[1] == 0x02:
                 try:

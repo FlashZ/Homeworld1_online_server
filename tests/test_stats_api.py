@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 
 from product_profile import CATACLYSM_PRODUCT_PROFILE, HOMEWORLD_PRODUCT_PROFILE
 import titan_binary_gateway
@@ -439,6 +440,42 @@ def test_gateway_probe_snapshots_report_readiness_state() -> None:
         "auth_keys_loaded": True,
         "routing_manager_attached": True,
     }
+
+
+def test_peer_session_ttl_allows_post_game_return_window() -> None:
+    gateway = titan_binary_gateway.BinaryGatewayServer(
+        "127.0.0.1",
+        9100,
+        public_host="homeworld.kerrbell.dev",
+        public_port=15101,
+        routing_port=15100,
+        valid_versions=["0110"],
+    )
+
+    freshish = titan_binary_gateway.PeerSession(
+        session_key=b"12345678",
+        session_id=7,
+        role=titan_binary_gateway.PEER_ROLE_DIRECTORY,
+        sequenced=True,
+    )
+    freshish.last_used_at = time.time() - 600.0
+    stale = titan_binary_gateway.PeerSession(
+        session_key=b"12345678",
+        session_id=8,
+        role=titan_binary_gateway.PEER_ROLE_FACTORY,
+        sequenced=True,
+    )
+    stale.last_used_at = time.time() - 1900.0
+    gateway._peer_sessions = {
+        freshish.session_id: freshish,
+        stale.session_id: stale,
+    }
+
+    expired = gateway._expire_peer_sessions()
+
+    assert expired == 1
+    assert freshish.session_id in gateway._peer_sessions
+    assert stale.session_id not in gateway._peer_sessions
 
 
 def test_gateway_runtime_config_defaults_follow_selected_product() -> None:
