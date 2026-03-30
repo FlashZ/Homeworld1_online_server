@@ -1,224 +1,137 @@
-# Homeworld 1 - WON OSS Server
+# Retail WON OSS Server
 
 [![Tests](https://github.com/FlashZ/won_oss_server/actions/workflows/tests.yml/badge.svg)](https://github.com/FlashZ/won_oss_server/actions/workflows/tests.yml)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/downloads/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![Homeworld 1.05](https://img.shields.io/badge/Homeworld-1.05-orange)](https://en.wikipedia.org/wiki/Homeworld)
+[![Cataclysm 1.0.0.1](https://img.shields.io/badge/Cataclysm-1.0.0.1-teal)](https://en.wikipedia.org/wiki/Homeworld:_Cataclysm)
 
-Open-source replacement for the Sierra WON (World Opponent Network) backend services, targeting **Homeworld 1 multiplayer**. It implements the real WON/Titan wire protocol - Auth1 key exchange, NR-MD5 signatures, and ElGamal encryption - so the original unpatched Homeworld 1 client can connect directly.
+Open-source online bootstrap for the original retail **Homeworld** and **Homeworld: Cataclysm** clients.
 
-Tested against Homeworld 1.05. Homeworld Remastered Classic is not supported (its multiplayer was removed and it does not behave like the original retail client).
+This project gives players a simple Windows installer that points the retail games at a working WON-compatible server, installs the required verifier key, and can write a matching retail-format CD key for online login.
 
-## Quick start (Docker)
+Homeworld Remastered Classic is not supported.
 
-```bash
-cp .env.example .env        # then edit PUBLIC_HOST, BACKEND_SHARED_SECRET, and ADMIN_TOKEN
-docker compose up -d --build
-```
+## Note
 
-This builds one Docker image, then runs two containers from it: `backend` and `gateway`. On first launch the backend seeds default keys/database into `./data`, and both containers reuse that persistent state on later restarts.
+This repo has also been a genuine test for me of how far AI can help with reverse engineering.
 
-Ports to expose:
+I was not trying to reproduce or copy the original server code. The idea was to work from retail clients, packet behavior, public assets, and live testing, and use AI to help piece together compatible server behavior from the outside in.
 
-| Port | Purpose |
-|------|---------|
-| `15101/tcp` | Auth1 and directory queries |
-| `15100-15120/tcp` | Routing, chat, and game rooms |
-| `2021/tcp` | Firewall/NAT probe |
+So alongside getting retail Homeworld and Cataclysm working online again, this project has also been me pushing on AI-assisted reverse engineering in a real practical setting.
 
-The admin dashboard is available at `http://127.0.0.1:8080/?token=...` on the host machine. In Docker, the dashboard is published through the gateway container, so `ADMIN_TOKEN` is required.
+This is also an unofficial fan project. It is not affiliated with, endorsed by, sponsored by, or connected to Relic Entertainment, Sierra, or any current or former owners of the Homeworld intellectual property.
 
-## Testing
+## For Players
 
-Run the Python test suite locally from the repo root:
+Download the latest installer from [GitHub Releases](https://github.com/FlashZ/won_oss_server/releases).
 
-```bash
-python -m pip install -r requirements-server.txt
-python -m pip install pytest
-python -m pytest
-```
+### Quick install
 
-GitHub Actions runs the same suite on every push and pull request across Python 3.10, 3.11, and 3.12.
+1. Download `RetailWONSetup.exe`.
+2. Right-click it and choose `Run as administrator`.
+3. Let it detect your Homeworld and/or Cataclysm install.
+4. If you have both games installed, you can configure both in one run.
+5. Confirm the detected install folder for each game.
+6. Finish the setup, then launch the game normally.
 
-## Client setup
+The installer can:
 
-Distribute `HWOnlineSetup.exe` to players. Run as Administrator
+- auto-detect retail Homeworld and Cataclysm installs
+- show the folder it found before it changes anything
+- let you change that folder if it found the wrong copy
+- update `NetTweak.script` to point at your server
+- install the matching `kver.kp` verifier key
+- optionally write a randomized retail CD key for the selected game
 
-The installer auto-detects the Homeworld install directory, optionally writes a randomized bundled CD key to the registry, updates `NetTweak.script` to point at your server, and installs the `kver.kp` verifier key. No Python required on client machines.
+### In Game (Homeworld)
 
-The bundled installer pool is still static at runtime, but you can now regenerate a much larger pool from the real retail algorithm with `generate_cdkeys.py` instead of hand-curating captured keys.
+1. Click Internet.
+2. Click New Account
+3. Enter desired username and password
+4. Click Create New Account
+5. Launch WON
 
-To rebuild the installer from source:
+### In Game (Cataclysm/Emergence)
 
-```powershell
-installer\build_installer.bat
-```
+1. Click Internet.
+2. Click New Account
+3. Enter desired username and password
+4. Cancel on the details screen (it will ask for email, country, and zip code)
+5. Click Create New Account
+6. Launch WON
 
-### How client bootstrap works
+### Notable Bug Fix
 
-Two files control which server the game contacts:
+- Fixes the classic Homeworld desync bug caused by shooting dust clouds with ion cannons
 
-- **`NetTweak.script`** - tells Homeworld which directory/patch server to connect to (`DIRSERVER_IPSTRINGS`, `DIRSERVER_PORTS`, `PATCHSERVER_IPSTRINGS`, `PATCHSERVER_PORTS`). The installer updates these values while preserving the rest of the retail script (LAN settings, port tuning).
-- **`kver.kp`** - the verifier public key the client uses to validate the server's Auth1 handshake.
+### What the installer changes
 
-Both must match the server you are running. If the host points at one server but the verifier key belongs to another, the client will connect but Auth1 will fail.
+The installer only touches the files and registry values needed for online play:
 
-## Server setup (Python)
+- `NetTweak.script`
+- `kver.kp`
+- the Sierra/WON CD key registry values for the selected game, if you leave CD key install enabled
 
-Install dependencies:
 
-```powershell
-python -m pip install -r requirements-server.txt
-```
+### SmartScreen and hash checking
 
-Optionally generate fresh keys (skip this to use the bundled key set):
+GitHub releases include:
 
-```powershell
-python generate_keys.py --keys-dir keys
-```
+- `RetailWONSetup-....exe`
+- `RetailWONSetup-....exe.sha256`
+- `RetailWONSetup-....exe.VERIFY.txt`
 
-Generate true retail-compatible Homeworld or Cataclysm CD keys:
-
-```powershell
-python generate_cdkeys.py --product Homeworld --count 10
-python generate_cdkeys.py --product Cataclysm --count 25 --format csharp
-```
-
-`--format csharp` emits `RegistryCdKeyOption(...)` lines you can paste into an installer pool.
-
-Start the backend and gateway in separate terminals:
+If Windows SmartScreen appears, check the file hash first:
 
 ```powershell
-# Terminal 1 - backend
-python won_server.py --host 127.0.0.1 --port 9100 --db-path won_server.db
-
-# Terminal 2 - gateway
-python titan_binary_gateway.py `
-  --host 0.0.0.0 --port 15101 `
-  --backend-host 127.0.0.1 --backend-port 9100 `
-  --public-host 192.168.x.x `
-  --routing-port 15100 `
-  --admin-host 127.0.0.1 --admin-port 8080 `
-  --keys-dir keys --log-level INFO
+Get-FileHash .\RetailWONSetup-....exe -Algorithm SHA256
 ```
 
-Set `--public-host` to the address clients will use to reach the server.
+The SHA-256 value printed by PowerShell must match the release `.sha256` file and the bundled `VERIFY.txt`.
 
-Security defaults:
+### Troubleshooting
 
-- The backend now defaults to `127.0.0.1` and only accepts non-loopback clients if you explicitly configure a matching shared secret with `won_server.py --shared-secret ...` and `titan_binary_gateway.py --backend-shared-secret ...`.
-- The dashboard defaults to `127.0.0.1`. If you bind `--admin-host` to anything non-loopback, you must also set `--admin-token` and include it as `?token=...` in the dashboard URL.
+`The installer found the wrong folder`
 
-### Docker details
+Use `Change...` on the install screen and point it at the exact game folder you actually launch from.
 
-Copy `.env.example` to `.env` and set at least `PUBLIC_HOST`, `BACKEND_SHARED_SECRET`, and `ADMIN_TOKEN`. To reuse existing data, place key files in `data/keys/` and/or the database at `data/won_server.db` before first start.
+`Homeworld works, but Cataclysm does not`
 
-```bash
-docker compose up -d --build   # start
-docker compose logs -f backend gateway   # watch logs
-docker compose down            # stop
-```
+Run the installer again and make sure Cataclysm was selected and patched too. The two games use different product settings and different CD key families.
 
-Compose now starts two services from the same image:
+`Can I use this with Remastered Classic?`
 
-- `backend` runs `won_server.py` on the internal Docker network only.
-- `gateway` runs `titan_binary_gateway.py` and publishes the Homeworld-facing ports plus a localhost-only admin dashboard.
+No. This project is for the original retail Homeworld family only as the Remastered Classic had the online option removed.
 
-The shared `./data` bind mount holds the SQLite database and Auth1 key material for both containers.
+## For Server Hosts
 
-There is no custom Docker entrypoint or sidecar supervisor in this setup. Compose launches the Python commands directly, and the only bootstrap logic left is a small first-run seed step in the backend service command so `./data` starts with the bundled database and keys.
+If you are trying to run the server, Docker stack, shared-edge setup, admin dashboard, or rebuild the installer from source, use the server guide:
 
-Useful environment knobs:
+- [Server Setup Guide](docs/server-setup.md)
 
-- `BACKEND_SHARED_SECRET` is required in Docker because the gateway talks to the backend over the Compose bridge network instead of container-local loopback.
-- `ADMIN_TOKEN` is required in Docker because the gateway must bind the dashboard on `0.0.0.0` inside the container before Docker can publish it back to `127.0.0.1` on the host.
-- `BACKEND_PORT`, `GATEWAY_PORT`, `ROUTING_PORT`, `ROUTING_MAX_PORT`, `FIREWALL_PORT`, and `ADMIN_PORT` let you remap the container listeners if needed.
+Additional technical docs:
 
-## Architecture
+- [Cataclysm Bootstrap Notes](docs/cataclysm-bootstrap-notes.md)
+- [Unified Edge / Two Backend Architecture Notes](docs/unified-edge-two-backend-architecture.md)
 
-```mermaid
-flowchart LR
-    client["Homeworld 1 Client"]
-    installer["Windows Installer<br/>HWOnlineSetup.exe"]
+## What This Project Supports
 
-    subgraph gateway["Binary Gateway<br/>titan_binary_gateway.py"]
-        auth["Auth1 + Directory<br/>15101"]
-        routing["Native Routing / Lobby<br/>15100-15120"]
-        firewall["Firewall Probe<br/>2021"]
-        dashboard["Admin Dashboard<br/>8080"]
-        bus["GatewayEventBus"]
-        codecs["titan_messages.py"]
-        crypto["won_crypto.py"]
-    end
+- retail Homeworld 1.05 bootstrap/install flow
+- retail Homeworld: Cataclysm 1.0.0.1 bootstrap/install flow
+- randomized retail-format CD key generation per game
+- WON-style Auth1, directory, routing, factory, and firewall services
+- an admin dashboard for live server monitoring
 
-    backend["JSON Backend<br/>won_server.py<br/>9100"]
-    db[("SQLite WAL")]
+## Support
 
-    installer --> client
-    client -->|"Titan binary protocol"| auth
-    client -->|"Routing and game traffic"| routing
-    client -->|"NAT probe"| firewall
-    auth -->|"JSON RPC"| backend
-    routing -->|"JSON RPC"| backend
-    auth --> bus
-    routing --> bus
-    dashboard --> bus
-    backend --> db
-    auth --> codecs
-    auth --> crypto
-```
+If you want to support the project:
 
-The server has two processes:
+<script type="text/javascript" src="https://cdnjs.buymeacoffee.com/1.0.0/button.prod.min.js" data-name="bmc-button" data-slug="nickkb" data-color="#5F7FFF" data-emoji="" data-font="Cookie" data-text="Buy me a coffee" data-outline-color="#000000" data-font-color="#ffffff" data-coffee-color="#FFDD00"></script>
 
-- **`won_server.py`** - JSON-RPC backend handling auth, lobbies, matchmaking, and game-launch lifecycle. Persists state to SQLite (WAL mode).
-- **`titan_binary_gateway.py`** - Binary protocol gateway that speaks the native Titan wire format. Handles Auth1 handshakes, directory queries, routing, the factory service, firewall probes, and the admin dashboard. Communicates with the backend over internal JSON-RPC.
+[Buy me a coffee](https://www.buymeacoffee.com/nickkb)
 
-Supporting modules:
+## License
 
-- **`won_crypto.py`** - NR-MD5 signatures, ElGamal encryption, DER key encoding, Auth1 key block and certificate builders.
-- **`titan_messages.py`** - Titan message schemas and codecs.
-
-### What's implemented
-
-- Full Auth1 handshake with signed certificates
-- Encrypted Auth1Peer sessions for directory and factory requests
-- Directory service returning auth, routing, factory, and version entries
-- Native Homeworld routing: client registration, chat, data relay, data objects, keepalives
-- Legacy Silencer lobby/conflict protocol
-- Factory service for dynamic game room port allocation
-- Reconnect-to-match with a short grace window
-- Push-based event delivery via `GatewayEventBus`
-- Admin dashboard with live rooms, players, chat, logs, and database snapshot
-- SQLite WAL persistence across restarts
-
-### Known limitations
-
-- **Native auth is still lightweight** - Homeworld/Cataclysm Auth1 now decrypts the native login blob, requires explicit account creation on first use, rejects missing or invalid retail-format CD keys, and binds each username to its first successful CD key. The legacy JSON auth endpoint still auto-creates users and there is no global CD-key uniqueness enforcement yet.
-- **NAT detection** - the firewall probe reply is implemented but strict-NAT behavior needs broader field testing.
-- **Reconnect-to-match** - matches on player name and IP; needs wider real-world validation.
-- **In-process routing** - routing rooms are managed in-gateway rather than spawning external `RoutingServHWGame` binaries.
-
-## Roadmap
-
-- **Decode gameplay packets** - the server relays `SendData`/`SendDataBroadcast` traffic as opaque bytes. Next step is classifying packet shapes and mapping them to in-game actions.
-- **Match diagnostics** - once packets are decoded, surface match timelines, desync clues, and launch/end markers in the admin dashboard.
-- **Match telemetry** - use decoded traffic for result summaries, lightweight stats, and more reliable reconnect/resync.
-
-## Self-hosting with your own keys
-
-The source code is public, but network identity is defined by the key material in `keys/`. The two private `.der` files are the sensitive part - do not publish them if you want to remain the sole operator of your network.
-To run an independent network:
-
-1. Generate a fresh key set: `python generate_keys.py --keys-dir keys`
-2. Use a fresh hostname/IP and database.
-3. If using Docker, place your key files in `./data/keys/` before first `docker compose up`.
-4. Rebuild the installer with your host and `kver.kp` embedded (update `installer/hwclient_setup.cs`, then run `build_installer.bat`).
-5. Distribute that installer to your players, or manually distribute `kver.kp` and a matching `NetTweak.script`.
-
-Key rules:
-
-- `kver.kp` must match the verifier keypair the server uses
-- Every client on your network needs the matching `kver.kp`
-- Clients using a different network's installer or `kver.kp` will not trust your server
-- Reusing someone else's private keys joins their trust domain rather than creating your own
+AGPL-3.0. See [LICENSE](LICENSE) if present in your checkout, or the badge link above.
