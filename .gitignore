@@ -18,3 +18,7 @@ docs/*
 !docs/cataclysm-bootstrap-notes.md
 !docs/unified-edge-two-backend-architecture.md
 discord_stats_bot.py
+HWOnlineSetup.exe
+requirements-discord-bot.txt
+docs/
+examples/
